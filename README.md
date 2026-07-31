@@ -162,7 +162,8 @@ Publish a command
 ```bash
 ros2 topic pub /arm_cmd ...
 ```
-
+For additional ROS 2 CLI examples for testing and controlling the robot, see the
+[Examples Wiki](https://github.com/LufsSeccus/Ros2_Kuka_External_Control_Bridge_API/wiki/Examples).
 If the connection has been established successfully, the LBR should begin executing the received command.
 
 ---
