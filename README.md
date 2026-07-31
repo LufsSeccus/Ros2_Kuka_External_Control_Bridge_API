@@ -193,12 +193,6 @@ The project is still under active development.
 
 Planned features include
 
-- KMP.move() implementation
-- Set_Arm_Joint_Deg
-- Set_Arm_Joint_Rad
-- Set_Arm_World
-- Improved feedback interface
-- Additional RoboticsAPI commands
 - Safety watchdog
 - Better error handling
 
@@ -230,6 +224,5 @@ Use at your own risk. Always ensure the robot is operated in a safe environment 
 
 # Future Work
 
-- Full KMP support
-- Joint state feedback
+
 - Multi-robot support
