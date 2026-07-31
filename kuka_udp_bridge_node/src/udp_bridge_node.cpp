@@ -231,6 +231,23 @@ private:
             << ".csv";
         return oss.str();
     }
+    std::string format_raw_timestamp(const std::string& raw_ts_str) {
+        try {
+            uint64_t raw_ms = std::stoull(raw_ts_str);
+            std::time_t sec = static_cast<std::time_t>(raw_ms / 1000);
+            uint32_t remainder_ms = static_cast<uint32_t>(raw_ms % 1000);
+
+            std::tm parts;
+            localtime_r(&sec, &parts);
+
+            std::ostringstream oss;
+            oss << std::put_time(&parts, "%Y-%m-%d %H:%M:%S")
+                << "." << std::setfill('0') << std::setw(3) << remainder_ms;
+            return oss.str();
+        } catch (...) {
+            return raw_ts_str; // Fallback to raw string if parsing fails
+        }
+    }
 
     // --- Telemetry RX Processing Loop ---
 
@@ -273,7 +290,13 @@ private:
                     std::string csv_line = msg;
                     // Replace the Java ';' delimiters with ',' for the CSV table
                     std::replace(csv_line.begin(), csv_line.end(), ';', ',');
-                    
+                     // Extract and format the epoch timestamp (first column)
+                    size_t first_comma = csv_line.find(',');
+                    if (first_comma != std::string::npos) {
+                        std::string raw_ts = csv_line.substr(0, first_comma);
+                        std::string readable_ts = format_raw_timestamp(raw_ts);
+                        csv_line = readable_ts + csv_line.substr(first_comma);
+                    }
                     telemetry_log_file_ << csv_line << "\n";
                     telemetry_log_file_.flush(); // Ensure it writes to disk immediately
                 }
