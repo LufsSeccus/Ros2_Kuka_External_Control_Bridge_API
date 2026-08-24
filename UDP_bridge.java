@@ -18,6 +18,8 @@ import com.kuka.roboticsAPI.motionModel.IMotionContainer;
 import com.kuka.roboticsAPI.motionModel.PTP;
 import com.kuka.roboticsAPI.motionModel.kmp.MobilePlatformRelativeMotion;
 import com.kuka.task.ITaskLogger;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 public class UDP_bridge extends RoboticsAPIApplication {
 
@@ -66,11 +68,45 @@ public class UDP_bridge extends RoboticsAPIApplication {
             udpSocket = new DatagramSocket(PORT_ROBOT);
             ros2Address = null;     
 
+            startPlatformWorker();
+
             logger.info("KMP + LBR UDP Bridge initialized on port " + PORT_ROBOT + ". Awaiting ROS2 handshake...");
         } catch (Exception e) {
             logger.error("Setup failed: " + e.getMessage());
         }
     }
+
+    private void startPlatformWorker() {
+    platformWorkerThread = new Thread(new Runnable() {
+        @Override
+        public void run() {
+            while (isRunning) {
+                try {
+                    // Blocks until a new command enters the queue
+                    PlatformMotionCmd cmd = platformQueue.take();
+
+                    double dAlpha_rad = Math.toRadians(cmd.dAlphaDegrees);
+                    MobilePlatformRelativeMotion relMotion = 
+                        new MobilePlatformRelativeMotion(cmd.dx, cmd.dy, dAlpha_rad);
+
+                    // 1. Blocking KUKA execution (waits until physically finished)
+                    kmp.move(relMotion);
+
+                    // 2. Update odometry ONLY after physical completion
+                    kmpPose.update(cmd.dx, cmd.dy, cmd.dAlphaDegrees);
+
+                } catch (InterruptedException e) {
+                    // Queue interrupted during shutdown
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception e) {
+                    logger.error("Platform execution error: " + e.getMessage());
+                }
+            }
+        }
+    });
+    platformWorkerThread.start();
+}
 
     @Override
     public void run() {
@@ -141,6 +177,22 @@ public class UDP_bridge extends RoboticsAPIApplication {
             }
         }
     }
+
+    private static class PlatformMotionCmd {
+        final double dx;
+        final double dy;
+        final double dAlphaDegrees;
+
+        PlatformMotionCmd(double dx, double dy, double dAlphaDegrees) {
+            this.dx = dx;
+            this.dy = dy;
+            this.dAlphaDegrees = dAlphaDegrees;
+        }
+}
+
+        // Thread-safe FIFO queue
+    private final BlockingQueue<PlatformMotionCmd> platformQueue = new LinkedBlockingQueue<PlatformMotionCmd>();
+    private Thread platformWorkerThread = null;
 
     private void processActiveParameters(String command, String value) {
         try {
@@ -229,28 +281,30 @@ public class UDP_bridge extends RoboticsAPIApplication {
     }
 
     private void executeRelativePlatformMotion(double dx, double dy, double dAlphaDegrees) {
-        // Preempt any active platform motion if still running
-        if (activePlatformThread != null && activePlatformThread.isAlive()) {
-        activePlatformThread.interrupt(); // This aborts the blocking KUKA move()
-        }
-        // Update local open-loop pose tracking
-        kmpPose.update(dx, dy, dAlphaDegrees);
+    //     // Preempt any active platform motion if still running
+    //     if (activePlatformThread != null && activePlatformThread.isAlive()) {
+    //     activePlatformThread.interrupt(); // This aborts the blocking KUKA move()
+    //     }
+    //     // Update local open-loop pose tracking
+    //     kmpPose.update(dx, dy, dAlphaDegrees);
 
-        double dAlpha_rad = Math.toRadians(dAlphaDegrees);
+    //     double dAlpha_rad = Math.toRadians(dAlphaDegrees);
 
-        final MobilePlatformRelativeMotion relMotion = new MobilePlatformRelativeMotion(dx, dy, dAlpha_rad);
+    //     final MobilePlatformRelativeMotion relMotion = new MobilePlatformRelativeMotion(dx, dy, dAlpha_rad);
         
-        // Non-blocking platform command
-        activePlatformThread = new Thread(new Runnable() {
-        @Override
-        public void run() {
-            try {
-                kmp.move(relMotion);
-            } catch (Exception e) {
-                // Thread interrupted or motion preempted, safely ignored
-            }
-        }
-    }
+    //     // Non-blocking platform command
+    //     activePlatformThread = new Thread(new Runnable() {
+    //     @Override
+    //     public void run() {
+    //         try {
+    //             kmp.move(relMotion);
+    //         } catch (Exception e) {
+    //             // Thread interrupted or motion preempted, safely ignored
+    //         }
+    //     }
+    // }
+        platformQueue.offer(new PlatformMotionCmd(dx, dy, dAlphaDegrees));
+        
     }
 
     private void executeArmJointMotion(double j1, double j2, double j3, double j4, double j5, double j6, double j7) {
@@ -379,10 +433,13 @@ public class UDP_bridge extends RoboticsAPIApplication {
         logger.warn("Stopping KMP/LBR application loop.");
         isRunning = false;
         isApplicationActive = false;
-
-        if (activePlatformThread != null && activePlatformThread.isAlive()) {
-        activePlatformThread.interrupt();
-    }
+        platformQueue.clear();
+        if (platformWorkerThread != null) {
+            platformWorkerThread.interrupt();
+        }
+    //     if (activePlatformThread != null && activePlatformThread.isAlive()) {
+    //     activePlatformThread.interrupt();
+    // }
         if (activeArmMotionContainer != null && !activeArmMotionContainer.isFinished()) {
             activeArmMotionContainer.cancel();
         }
