@@ -36,6 +36,10 @@ public class UDP_bridge extends RoboticsAPIApplication {
     private boolean isRunning = true;
     private boolean isApplicationActive = false;
 
+    // Dedicated background threads
+    private Thread telemetryThread = null;
+    private Thread platformWorkerThread = null;
+
     // Protocol tracking
     private long lastRxCounter = -1;
     private long txCounter = 0;
@@ -47,7 +51,21 @@ public class UDP_bridge extends RoboticsAPIApplication {
     private ICommandContainer activePlatformMotionContainer = null;
     private IMotionContainer activeArmMotionContainer = null;
 
-    // Open-loop local pose tracking (Dead reckoning without global map requirement)
+    // Thread-safe FIFO queue for KMP Motion Commands
+    private static class PlatformMotionCmd {
+        final double dx;
+        final double dy;
+        final double dAlphaDegrees;
+
+        PlatformMotionCmd(double dx, double dy, double dAlphaDegrees) {
+            this.dx = dx;
+            this.dy = dy;
+            this.dAlphaDegrees = dAlphaDegrees;
+        }
+    }
+    private final BlockingQueue<PlatformMotionCmd> platformQueue = new LinkedBlockingQueue<PlatformMotionCmd>();
+
+    // Open-loop local pose tracking (Dead reckoning)
     private class KmpPose {
         double x = 0;
         double y = 0;
@@ -66,54 +84,84 @@ public class UDP_bridge extends RoboticsAPIApplication {
     public void initialize() {
         try {
             udpSocket = new DatagramSocket(PORT_ROBOT);
+            // Socket timeout ensures receive() unblocks to check isRunning flag during shutdown
+            udpSocket.setSoTimeout(500); 
             ros2Address = null;     
 
             startPlatformWorker();
-
+            startTelemetryThread();
             logger.info("KMP + LBR UDP Bridge initialized on port " + PORT_ROBOT + ". Awaiting ROS2 handshake...");
         } catch (Exception e) {
             logger.error("Setup failed: " + e.getMessage());
         }
     }
 
-    private void startPlatformWorker() {
-    platformWorkerThread = new Thread(new Runnable() {
-        @Override
-        public void run() {
-            while (isRunning) {
-                try {
-                    // Blocks until a new command enters the queue
-                    PlatformMotionCmd cmd = platformQueue.take();
-
-                    double dAlpha_rad = Math.toRadians(cmd.dAlphaDegrees);
-                    MobilePlatformRelativeMotion relMotion = 
-                        new MobilePlatformRelativeMotion(cmd.dx, cmd.dy, dAlpha_rad);
-
-                    // 1. Blocking KUKA execution (waits until physically finished)
-                    kmp.move(relMotion);
-
-                    // 2. Update odometry ONLY after physical completion
-                    kmpPose.update(cmd.dx, cmd.dy, cmd.dAlphaDegrees);
-
-                } catch (InterruptedException e) {
-                    // Queue interrupted during shutdown
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (Exception e) {
-                    logger.error("Platform execution error: " + e.getMessage());
+    private void startTelemetryThread() {
+        telemetryThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                logger.info("[Telemetry Thread] Started streaming loop at 20 Hz.");
+                while (isRunning) {
+                    try {
+                        // Stream telemetry independently whenever session is active & ROS2 target IP is known
+                        if (isApplicationActive && ros2Address != null) {
+                            sendNativeTelemetry();
+                        }
+                        
+                        // 50 ms delay = steady 20 Hz update rate
+                        Thread.sleep(50); 
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    } catch (Exception e) {
+                        logger.error("[Telemetry Thread] Error: " + e.getMessage());
+                    }
                 }
             }
-        }
-    });
-    platformWorkerThread.start();
-}
+        });
+        
+        telemetryThread.setName("UDP-Telemetry-TX");
+        telemetryThread.start();
+    }
+
+    private void startPlatformWorker() {
+        platformWorkerThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (isRunning) {
+                    try {
+                        // Blocks until a new command enters the queue
+                        PlatformMotionCmd cmd = platformQueue.take();
+
+                        double dAlpha_rad = Math.toRadians(cmd.dAlphaDegrees);
+                        MobilePlatformRelativeMotion relMotion = 
+                            new MobilePlatformRelativeMotion(cmd.dx, cmd.dy, dAlpha_rad);
+
+                        // 1. Blocking KUKA execution (waits until physically finished)
+                        kmp.move(relMotion);
+
+                        // 2. Update odometry ONLY after physical completion
+                        kmpPose.update(cmd.dx, cmd.dy, cmd.dAlphaDegrees);
+
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    } catch (Exception e) {
+                        logger.error("Platform execution error: " + e.getMessage());
+                    }
+                }
+            }
+        });
+        platformWorkerThread.setName("UDP-Platform-Worker");
+        platformWorkerThread.start();
+    }
 
     @Override
     public void run() {
         byte[] receiveBuf = new byte[512];
 
         while (isRunning) {
-            // 1. INBOUND: Listen for ROS2 command strings
+            // INBOUND: Listen for ROS2 command strings
             try {
                 DatagramPacket receivePacket = new DatagramPacket(receiveBuf, receiveBuf.length);
                 udpSocket.receive(receivePacket);
@@ -166,33 +214,14 @@ public class UDP_bridge extends RoboticsAPIApplication {
                     }
                 }
             } catch (SocketTimeoutException e) {
-                // Allows loop iteration to trigger outbound telemetry smoothly
+                // Timeouts allow loop iteration to check isRunning safely without blocking
             } catch (Exception e) {
-                logger.error("Socket reading error: " + e.getMessage());
-            }
-
-            // 2. OUTBOUND: Send active platform pose telemetry back to ROS2
-            if (isApplicationActive) {
-                sendNativeTelemetry();
+                if (isRunning) {
+                    logger.error("Socket reading error: " + e.getMessage());
+                }
             }
         }
     }
-
-    private static class PlatformMotionCmd {
-        final double dx;
-        final double dy;
-        final double dAlphaDegrees;
-
-        PlatformMotionCmd(double dx, double dy, double dAlphaDegrees) {
-            this.dx = dx;
-            this.dy = dy;
-            this.dAlphaDegrees = dAlphaDegrees;
-        }
-}
-
-        // Thread-safe FIFO queue
-    private final BlockingQueue<PlatformMotionCmd> platformQueue = new LinkedBlockingQueue<PlatformMotionCmd>();
-    private Thread platformWorkerThread = null;
 
     private void processActiveParameters(String command, String value) {
         try {
@@ -261,16 +290,18 @@ public class UDP_bridge extends RoboticsAPIApplication {
                 }
             }
 
+            // ==========================================================
             // 4. LBR ARM CARTESIAN END-EFFECTOR MODE (x, y, z [m], a, b, c [rad])
+            // ==========================================================
             else if (command.equalsIgnoreCase("Set_Arm_End_Effector")) {
                 String[] pose = value.split(",");
                 if (pose.length == 6) {
-                    double x_mm = Double.parseDouble(pose[0]) * 1000.0; // convert meters to mm
+                    double x_mm = Double.parseDouble(pose[0]) * 1000.0;
                     double y_mm = Double.parseDouble(pose[1]) * 1000.0;
                     double z_mm = Double.parseDouble(pose[2]) * 1000.0;
-                    double a_rad = Double.parseDouble(pose[3]); // KUKA A (Z rotation)
-                    double b_rad = Double.parseDouble(pose[4]); // KUKA B (Y rotation)
-                    double c_rad = Double.parseDouble(pose[5]); // KUKA C (X rotation)
+                    double a_rad = Double.parseDouble(pose[3]); 
+                    double b_rad = Double.parseDouble(pose[4]); 
+                    double c_rad = Double.parseDouble(pose[5]); 
 
                     executeCartesianArmMotion(x_mm, y_mm, z_mm, a_rad, b_rad, c_rad);
                 }
@@ -281,92 +312,56 @@ public class UDP_bridge extends RoboticsAPIApplication {
     }
 
     private void executeRelativePlatformMotion(double dx, double dy, double dAlphaDegrees) {
-    //     // Preempt any active platform motion if still running
-    //     if (activePlatformThread != null && activePlatformThread.isAlive()) {
-    //     activePlatformThread.interrupt(); // This aborts the blocking KUKA move()
-    //     }
-    //     // Update local open-loop pose tracking
-    //     kmpPose.update(dx, dy, dAlphaDegrees);
-
-    //     double dAlpha_rad = Math.toRadians(dAlphaDegrees);
-
-    //     final MobilePlatformRelativeMotion relMotion = new MobilePlatformRelativeMotion(dx, dy, dAlpha_rad);
-        
-    //     // Non-blocking platform command
-    //     activePlatformThread = new Thread(new Runnable() {
-    //     @Override
-    //     public void run() {
-    //         try {
-    //             kmp.move(relMotion);
-    //         } catch (Exception e) {
-    //             // Thread interrupted or motion preempted, safely ignored
-    //         }
-    //     }
-    // }
         platformQueue.offer(new PlatformMotionCmd(dx, dy, dAlphaDegrees));
-        
     }
 
     private void executeArmJointMotion(double j1, double j2, double j3, double j4, double j5, double j6, double j7) {
-        // Preempt active arm motion if still running
         if (activeArmMotionContainer != null && !activeArmMotionContainer.isFinished()) {
             logger.info("[Set_Arm] Preempting active arm motion for new command.");
             activeArmMotionContainer.cancel();
         }
         try {
-        // 2. Fetch current joint positions for comparison
-        JointPosition currentJoints = lbr.getCurrentJointPosition();
-        
-        String currentPosStr = String.format(java.util.Locale.US,
-            "Current Pos (deg) -> J1: %.2f | J2: %.2f | J3: %.2f | J4: %.2f | J5: %.2f | J6: %.2f | J7: %.2f",
-            Math.toDegrees(currentJoints.get(0)),
-            Math.toDegrees(currentJoints.get(1)),
-            Math.toDegrees(currentJoints.get(2)),
-            Math.toDegrees(currentJoints.get(3)),
-            Math.toDegrees(currentJoints.get(4)),
-            Math.toDegrees(currentJoints.get(5)),
-            Math.toDegrees(currentJoints.get(6))
-        );
+            JointPosition currentJoints = lbr.getCurrentJointPosition();
+            
+            String currentPosStr = String.format(Locale.US,
+                "Current Pos (deg) -> J1: %.2f | J2: %.2f | J3: %.2f | J4: %.2f | J5: %.2f | J6: %.2f | J7: %.2f",
+                Math.toDegrees(currentJoints.get(0)), Math.toDegrees(currentJoints.get(1)),
+                Math.toDegrees(currentJoints.get(2)), Math.toDegrees(currentJoints.get(3)),
+                Math.toDegrees(currentJoints.get(4)), Math.toDegrees(currentJoints.get(5)),
+                Math.toDegrees(currentJoints.get(6))
+            );
 
-        // 3. Format target joint positions in degrees
-        String targetPosStr = String.format(java.util.Locale.US,
-            "Target  Pos (deg) -> J1: %.2f | J2: %.2f | J3: %.2f | J4: %.2f | J5: %.2f | J6: %.2f | J7: %.2f",
-            Math.toDegrees(j1), Math.toDegrees(j2), Math.toDegrees(j3),
-            Math.toDegrees(j4), Math.toDegrees(j5), Math.toDegrees(j6), Math.toDegrees(j7)
-        );
+            String targetPosStr = String.format(Locale.US,
+                "Target  Pos (deg) -> J1: %.2f | J2: %.2f | J3: %.2f | J4: %.2f | J5: %.2f | J6: %.2f | J7: %.2f",
+                Math.toDegrees(j1), Math.toDegrees(j2), Math.toDegrees(j3),
+                Math.toDegrees(j4), Math.toDegrees(j5), Math.toDegrees(j6), Math.toDegrees(j7)
+            );
 
-        // 4. Output structured logs to smartPAD Task Logger
-        logger.info("=== [LBR Arm Motion Triggered] ===");
-        logger.info(currentPosStr);
-        logger.info(targetPosStr);
+            logger.info("=== [LBR Arm Motion Triggered] ===");
+            logger.info(currentPosStr);
+            logger.info(targetPosStr);
 
-    } catch (Exception e) {
-        logger.warn("[Set_Arm] Could not read current position for logging: " + e.getMessage());
-    }
+        } catch (Exception e) {
+            logger.warn("[Set_Arm] Could not read current position for logging: " + e.getMessage());
+        }
 
         JointPosition targetJoints = new JointPosition(j1, j2, j3, j4, j5, j6, j7);
         PTP ptpMotion = new PTP(targetJoints);
-
-        // Non-blocking LBR PTP motion
         activeArmMotionContainer = lbr.moveAsync(ptpMotion);
     }
 
     private void executeCartesianArmMotion(double x_mm, double y_mm, double z_mm, double a_rad, double b_rad, double c_rad) {
-        // Preempt active arm motion if still running
         if (activeArmMotionContainer != null && !activeArmMotionContainer.isFinished()) {
             logger.info("[Set_Arm_EE] Preempting active arm motion for new command.");
             activeArmMotionContainer.cancel();
         }
 
         try {
-            // Fetch current Cartesian position for comparison
             com.kuka.roboticsAPI.geometricModel.Frame currentFrame = lbr.getCurrentCartesianPosition(lbr.getFlange());
 
             String currentCartStr = String.format(Locale.US,
                 "Current EE -> X: %.2f mm | Y: %.2f mm | Z: %.2f mm | A: %.2f deg | B: %.2f deg | C: %.2f deg",
-                currentFrame.getX(),
-                currentFrame.getY(),
-                currentFrame.getZ(),
+                currentFrame.getX(), currentFrame.getY(), currentFrame.getZ(),
                 Math.toDegrees(currentFrame.getAlphaRad()),
                 Math.toDegrees(currentFrame.getBetaRad()),
                 Math.toDegrees(currentFrame.getGammaRad())
@@ -375,9 +370,7 @@ public class UDP_bridge extends RoboticsAPIApplication {
             String targetCartStr = String.format(Locale.US,
                 "Target  EE -> X: %.2f mm | Y: %.2f mm | Z: %.2f mm | A: %.2f deg | B: %.2f deg | C: %.2f deg",
                 x_mm, y_mm, z_mm,
-                Math.toDegrees(a_rad),
-                Math.toDegrees(b_rad),
-                Math.toDegrees(c_rad)
+                Math.toDegrees(a_rad), Math.toDegrees(b_rad), Math.toDegrees(c_rad)
             );
 
             logger.info("=== [LBR Arm Cartesian Motion Triggered] ===");
@@ -388,11 +381,9 @@ public class UDP_bridge extends RoboticsAPIApplication {
             logger.warn("[Set_Arm_EE] Could not read current Cartesian frame for logging: " + e.getMessage());
         }
 
-     // Build target Frame relative to LBR Root Frame
         com.kuka.roboticsAPI.geometricModel.Frame targetFrame = 
             new com.kuka.roboticsAPI.geometricModel.Frame(lbr.getRootFrame(), x_mm, y_mm, z_mm, a_rad, b_rad, c_rad);
 
-        // Non-blocking LBR PTP motion using BasicMotions helper
         activeArmMotionContainer = lbr.moveAsync(com.kuka.roboticsAPI.motionModel.BasicMotions.ptp(targetFrame));
     }
 
@@ -403,14 +394,14 @@ public class UDP_bridge extends RoboticsAPIApplication {
             txCounter++;
 
             // 1. KMP Base Pose Payload (X, Y, Alpha)
-            String posePayload = String.format(java.util.Locale.US, "%.3f,%.3f,%.3f", kmpPose.x, kmpPose.y, kmpPose.alpha);
+            String posePayload = String.format(Locale.US, "%.3f,%.3f,%.3f", kmpPose.x, kmpPose.y, kmpPose.alpha);
 
-            // 2. Read LBR Arm Joint Positions (Returns values in radians, converted to degrees)
+            // 2. Read LBR Arm Joint Positions (Rad to Deg)
             JointPosition currentJoints = lbr.getCurrentJointPosition();
             StringBuilder armPayloadBuilder = new StringBuilder();
             for (int i = 0; i < 7; i++) {
                 double deg = Math.toDegrees(currentJoints.get(i));
-                armPayloadBuilder.append(String.format(java.util.Locale.US, "%.2f", deg));
+                armPayloadBuilder.append(String.format(Locale.US, "%.2f", deg));
                 if (i < 6) {
                     armPayloadBuilder.append(",");
                 }
@@ -418,7 +409,7 @@ public class UDP_bridge extends RoboticsAPIApplication {
             String armPayload = armPayloadBuilder.toString();
 
             // 3. Format complete packet: Timestamp;ErrorCode;Counter;BasePose;ArmPose
-            String stateMsg = String.format(java.util.Locale.US, "%d;0;%d;%s;%s", 
+            String stateMsg = String.format(Locale.US, "%d;0;%d;%s;%s", 
                     currentTime, txCounter, posePayload, armPayload);
 
             byte[] data = stateMsg.getBytes("UTF-8");
@@ -434,12 +425,13 @@ public class UDP_bridge extends RoboticsAPIApplication {
         isRunning = false;
         isApplicationActive = false;
         platformQueue.clear();
-        if (platformWorkerThread != null) {
+
+        if (telemetryThread != null && telemetryThread.isAlive()) {
+            telemetryThread.interrupt();
+        }
+        if (platformWorkerThread != null && platformWorkerThread.isAlive()) {
             platformWorkerThread.interrupt();
         }
-    //     if (activePlatformThread != null && activePlatformThread.isAlive()) {
-    //     activePlatformThread.interrupt();
-    // }
         if (activeArmMotionContainer != null && !activeArmMotionContainer.isFinished()) {
             activeArmMotionContainer.cancel();
         }
