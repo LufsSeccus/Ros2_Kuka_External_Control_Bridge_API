@@ -1,4 +1,4 @@
- #include <chrono>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -6,9 +6,9 @@
 #include <sstream>
 #include <vector>
 #include <iostream>
-#include <fstream>   // Added for file I/O
-#include <iomanip>   // Added for time formatting
-#include <algorithm> // Added for std::replace
+#include <fstream>   
+#include <iomanip>   
+#include <algorithm> 
 
 // Linux Socket Headers
 #include <sys/socket.h>
@@ -32,8 +32,7 @@ using namespace std::chrono_literals;
 
 class KukaUdpBridge : public rclcpp::Node {
 public:
-    KukaUdpBridge() : Node("kuka_udp_bridge"), tx_counter_(0) {
-        // 1. Declare ROS2 Parameters
+    KukaUdpBridge() : Node("kuka_udp_bridge"), tx_counter_(0), last_base_reached_state_(true) {
         this->declare_parameter<std::string>("robot_ip", "172.31.1.10");
         this->declare_parameter<int>("robot_port", 30300);
         this->declare_parameter<int>("client_port", 30333);
@@ -45,16 +44,12 @@ public:
         RCLCPP_INFO(this->get_logger(), "[KUKA UDP Bridge] Target Robot: %s:%d", robot_ip_.c_str(), robot_port_);
         RCLCPP_INFO(this->get_logger(), "[KUKA UDP Bridge] Local Listening Port: %d", client_port_);
 
-        // 2. Setup UDP Sockets
         setup_sockets();
 
-        // 3. ROS2 Publishers
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
         joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
-        // 3. ROS2 Publishers (Add this next to odom_pub_ and joint_pub_)
         base_target_pub_ = this->create_publisher<std_msgs::msg::Bool>("/base_target_reached", 10);
 
-        // 4. ROS2 Subscriptions
         cmd_vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
             "/cmd_vel", 10, std::bind(&KukaUdpBridge::cmd_vel_callback, this, std::placeholders::_1));
 
@@ -67,14 +62,11 @@ public:
         arm_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
             "/arm_goal_pose", 10, std::bind(&KukaUdpBridge::arm_pose_callback, this, std::placeholders::_1));
 
-        // TF Broadcaster
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
-        // 5. Start Background UDP RX Thread
         rx_thread_active_ = true;
         rx_thread_ = std::thread(&KukaUdpBridge::receive_thread_loop, this);
 
-        // 6. Send Initial Handshake Packet
         send_to_robot("App_Start", "true");
         RCLCPP_INFO(this->get_logger(), "[KUKA UDP Bridge] Sent App_Start handshake to robot.");
     }
@@ -90,7 +82,6 @@ public:
         if (sock_fd_ >= 0) {
             close(sock_fd_);
         }
-        // Safely close the logger file on shutdown
         if (telemetry_log_file_.is_open()) {
             telemetry_log_file_.close();
             RCLCPP_INFO(this->get_logger(), "[KUKA UDP Bridge] Telemetry log file saved and closed.");
@@ -135,17 +126,10 @@ private:
                (struct sockaddr *)&robot_addr_, sizeof(robot_addr_));
     }
 
-    // --- Command Callbacks ---
-
     void cmd_vel_callback(const geometry_msgs::msg::Twist::SharedPtr msg) {
         std::stringstream ss;
         ss << msg->linear.x << "," << msg->linear.y << "," << msg->angular.z;
         send_to_robot("Set_Vel", ss.str());
-
-        RCLCPP_INFO_THROTTLE(
-            this->get_logger(), *this->get_clock(), 500,
-            "[TX KMP Vel] vx: %.2f m/s | vy: %.2f m/s | omega: %.2f rad/s",
-            msg->linear.x, msg->linear.y, msg->angular.z);
     }
 
     void goal_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -164,35 +148,16 @@ private:
         std::stringstream ss;
         ss << x_mm << "," << y_mm << "," << alpha_deg;
         send_to_robot("Set_Pose", ss.str());
-
-        RCLCPP_INFO(
-            this->get_logger(),
-            "[TX KMP Pose] Target -> X: %.1f mm | Y: %.1f mm | Alpha: %.2f deg",
-            x_mm, y_mm, alpha_deg);
     }
 
     void arm_joint_callback(const sensor_msgs::msg::JointState::SharedPtr msg) {
-        if (msg->position.size() < 7) {
-            RCLCPP_WARN(this->get_logger(), "[TX Arm Joint] Expected 7 joint positions, got %ld", msg->position.size());
-            return;
-        }
-
+        if (msg->position.size() < 7) return;
         std::stringstream ss;
         for (size_t i = 0; i < 7; ++i) {
-            double deg = msg->position[i] * (180.0 / M_PI); // rad to deg
-            ss << deg;
+            ss << (msg->position[i] * (180.0 / M_PI));
             if (i < 6) ss << ",";
         }
-
         send_to_robot("Set_Arm_Joint", ss.str());
-
-        RCLCPP_INFO(
-            this->get_logger(),
-            "[TX Arm Joint] J1: %.1f° J2: %.1f° J3: %.1f° J4: %.1f° J5: %.1f° J6: %.1f° J7: %.1f°",
-            msg->position[0] * (180.0 / M_PI), msg->position[1] * (180.0 / M_PI),
-            msg->position[2] * (180.0 / M_PI), msg->position[3] * (180.0 / M_PI),
-            msg->position[4] * (180.0 / M_PI), msg->position[5] * (180.0 / M_PI),
-            msg->position[6] * (180.0 / M_PI));
     }
 
     void arm_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -213,27 +178,21 @@ private:
            << yaw_rad << "," << pitch_rad << "," << roll_rad;
 
         send_to_robot("Set_Arm_End_Effector", ss.str());
-
-        RCLCPP_INFO(
-            this->get_logger(),
-            "[TX Arm EE] Target -> Pos(m): [%.3f, %.3f, %.3f] | RPY(deg): [%.1f, %.1f, %.1f]",
-            x_m, y_m, z_m,
-            roll_rad * (180.0 / M_PI), pitch_rad * (180.0 / M_PI), yaw_rad * (180.0 / M_PI));
     }
 
     std::string get_log_filename() {
         auto now = std::chrono::system_clock::now();
         std::time_t now_c = std::chrono::system_clock::to_time_t(now);
         std::tm parts;
-        localtime_r(&now_c, &parts); // Safe parsing for Linux environments
+        localtime_r(&now_c, &parts);
 
         std::ostringstream oss;
-        // Format: logger_bridge_file_HH-MM_DD-MM-YYYY.csv
         oss << "kuka_log/logger_bridge_file_" 
             << std::put_time(&parts, "%H-%M_%d-%m-%Y") 
             << ".csv";
         return oss.str();
     }
+
     std::string format_raw_timestamp(const std::string& raw_ts_str) {
         try {
             uint64_t raw_ms = std::stoull(raw_ts_str);
@@ -248,11 +207,9 @@ private:
                 << "." << std::setfill('0') << std::setw(3) << remainder_ms;
             return oss.str();
         } catch (...) {
-            return raw_ts_str; // Fallback to raw string if parsing fails
+            return raw_ts_str;
         }
     }
-
-    // --- Telemetry RX Processing Loop ---
 
     void receive_thread_loop() {
         char rx_buf[1024];
@@ -270,30 +227,22 @@ private:
             if (bytes_received > 0) {
                 rx_buf[bytes_received] = '\0';
                 std::string msg(rx_buf);
-                // --- 1. INITIALIZE LOGGER FILE ON FIRST MESSAGE ---
+
                 if (!is_logging_started_) {
                     std::string filename = get_log_filename();
                     telemetry_log_file_.open(filename, std::ios::out | std::ios::app);
-                    
+
                     if (telemetry_log_file_.is_open()) {
-                        // Write the CSV Table Header
                         telemetry_log_file_ << "Timestamp,ErrorCode,Counter,"
-                                            << "KMP_X,KMP_Y,KMP_Alpha,"
+                                            << "KMP_X,KMP_Y,KMP_Alpha,BaseTargetReached,"
                                             << "Arm_J1,Arm_J2,Arm_J3,Arm_J4,Arm_J5,Arm_J6,Arm_J7\n";
-                        
                         is_logging_started_ = true;
-                        RCLCPP_INFO(this->get_logger(), "[KUKA UDP Bridge] Started telemetry logging: %s", filename.c_str());
-                    } else {
-                        RCLCPP_ERROR(this->get_logger(), "[KUKA UDP Bridge] Failed to create telemetry log file!");
                     }
                 }
 
-                // --- 2. APPEND TELEMETRY TO LOGGER ---
                 if (is_logging_started_ && telemetry_log_file_.is_open()) {
                     std::string csv_line = msg;
-                    // Replace the Java ';' delimiters with ',' for the CSV table
                     std::replace(csv_line.begin(), csv_line.end(), ';', ',');
-                     // Extract and format the epoch timestamp (first column)
                     size_t first_comma = csv_line.find(',');
                     if (first_comma != std::string::npos) {
                         std::string raw_ts = csv_line.substr(0, first_comma);
@@ -301,12 +250,12 @@ private:
                         csv_line = readable_ts + csv_line.substr(first_comma);
                     }
                     telemetry_log_file_ << csv_line << "\n";
-                    telemetry_log_file_.flush(); // Ensure it writes to disk immediately
+                    telemetry_log_file_.flush();
                 }
 
                 RCLCPP_INFO_THROTTLE(
                     this->get_logger(), *this->get_clock(), 1000,
-                    "[KUKA Telemetry RX] %s", msg.c_str());
+                    "[KUKA Telemetry RX] Raw Payload: %s", msg.c_str());
 
                 parse_and_publish_telemetry(msg);
             } else {
@@ -316,7 +265,6 @@ private:
     }
 
     void parse_and_publish_telemetry(const std::string& msg) {
-        // Expected Format: Timestamp;ErrorCode;Counter;BasePose(X,Y,Alpha);ArmPose(J1..J7)
         std::vector<std::string> parts;
         std::stringstream ss(msg);
         std::string item;
@@ -327,28 +275,27 @@ private:
         if (parts.size() < 4) return;
 
         try {
-            // 1. Base Pose Processing (X, Y, Alpha in mm and degrees)
-            std::vector<double> base_pose;
+            // 1. Base Pose & Flag Processing from parts[3]
+            // Format: X,Y,Alpha,baseTargetReached
+            std::vector<double> base_data;
             std::stringstream base_ss(parts[3]);
             std::string val;
             while (std::getline(base_ss, val, ',')) {
-                base_pose.push_back(std::stod(val));
+                base_data.push_back(std::stod(val));
             }
 
-            if (base_pose.size() >= 3) {
-                double x_m = base_pose[0] / 1000.0;
-                double y_m = base_pose[1] / 1000.0;
-                double yaw_rad = base_pose[2] * (M_PI / 180.0);
+            if (base_data.size() >= 3) {
+                double x_m = base_data[0] / 1000.0;
+                double y_m = base_data[1] / 1000.0;
+                double yaw_rad = base_data[2] *(M_PI / 180.0);
 
                 // Publish Odometry
                 auto odom_msg = nav_msgs::msg::Odometry();
                 odom_msg.header.stamp = this->now();
                 odom_msg.header.frame_id = "odom";
                 odom_msg.child_frame_id = "base_footprint";
-
                 odom_msg.pose.pose.position.x = x_m;
                 odom_msg.pose.pose.position.y = y_m;
-                odom_msg.pose.pose.position.z = 0.0;
 
                 tf2::Quaternion q;
                 q.setRPY(0, 0, yaw_rad);
@@ -356,22 +303,34 @@ private:
                 odom_msg.pose.pose.orientation.y = q.y();
                 odom_msg.pose.pose.orientation.z = q.z();
                 odom_msg.pose.pose.orientation.w = q.w();
-
                 odom_pub_->publish(odom_msg);
 
-                // Broadcast TF
                 geometry_msgs::msg::TransformStamped tf_msg;
                 tf_msg.header = odom_msg.header;
                 tf_msg.child_frame_id = odom_msg.child_frame_id;
                 tf_msg.transform.translation.x = x_m;
                 tf_msg.transform.translation.y = y_m;
-                tf_msg.transform.translation.z = 0.0;
                 tf_msg.transform.rotation = odom_msg.pose.pose.orientation;
-
                 tf_broadcaster_->sendTransform(tf_msg);
             }
 
-            // 2. LBR Joint State Processing (If Arm telemetry present)
+            // Extract baseTargetReached if it's the 4th comma-separated value in base_data (index 3)
+            if (base_data.size() >= 4) {
+                bool current_reached_state = (base_data[3] >= 0.5); // 1.0 means reached, 0.0 means moving
+
+                if (current_reached_state != last_base_reached_state_) {
+                    RCLCPP_INFO(this->get_logger(), 
+                        ">>> [KMP STATE CHANGE] Target Reached Flag: %s <<<", 
+                        current_reached_state ? "YES (1 - Reached)" : "NO (0 - Moving)");
+                    last_base_reached_state_ = current_reached_state;
+                }
+
+                auto reached_msg = std_msgs::msg::Bool();
+                reached_msg.data = current_reached_state; 
+                base_target_pub_->publish(reached_msg);
+            }
+
+            // 2. LBR Joint State Processing (Parts[4] is the arm payload)
             if (parts.size() >= 5) {
                 std::vector<double> arm_joints_deg;
                 std::stringstream arm_ss(parts[4]);
@@ -388,18 +347,10 @@ private:
                     };
 
                     for (int i = 0; i < 7; ++i) {
-                        joint_msg.position.push_back(arm_joints_deg[i] * (M_PI / 180.0)); // deg to rad
+                        joint_msg.position.push_back(arm_joints_deg[i] * (M_PI / 180.0));
                     }
-
                     joint_pub_->publish(joint_msg);
                 }
-            }
-            // 3. Base Idle Status Processing
-            if (parts.size() >= 6) {
-                auto reached_msg = std_msgs::msg::Bool();
-                // Safer check: look for the "1" char anywhere in the substring
-                reached_msg.data = (parts[5].find("1") != std::string::npos); 
-                base_target_pub_->publish(reached_msg);
             }
 
         } catch (const std::exception& e) {
@@ -408,8 +359,6 @@ private:
                 "[KUKA Telemetry Parse Error] %s", e.what());
         }
     }
-
-    // Networking Data
     int sock_fd_ = -1;
     struct sockaddr_in robot_addr_;
     std::string robot_ip_;
@@ -417,11 +366,9 @@ private:
     int client_port_;
     long tx_counter_;
 
-    // File Logging Data
     std::ofstream telemetry_log_file_;
     bool is_logging_started_ = false;
 
-    // ROS2 Interfaces
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr base_target_pub_;
@@ -430,12 +377,12 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr arm_joint_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr arm_pose_sub_;
-    
+
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
-    // Multithreading
     std::thread rx_thread_;
     std::atomic<bool> rx_thread_active_;
+    bool last_base_reached_state_; 
 };
 
 int main(int argc, char * argv[]) {

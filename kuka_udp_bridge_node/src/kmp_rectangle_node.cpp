@@ -24,16 +24,16 @@ public:
         goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/goal_pose", 10);
         arm_joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/arm_cmd_joints", 10);
 
-        base_idle_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-            "/base_idle", 10, std::bind(&KmpRectangleNode::baseIdleCallback, this, std::placeholders::_1));
+        base_target_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+            "/base_target_reached", 10, std::bind(&KmpRectangleNode::baseReachedCallback, this, std::placeholders::_1));
             
         joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
             "/joint_states", 10, std::bind(&KmpRectangleNode::jointStateCallback, this, std::placeholders::_1));
 
         waypoints_ = {
             {1.0, 0.0, 0.0,   {0.0, 20.0, 0.0, -90.0, 0.0, 60.0, 0.0}},
-            {1.0, 1.0, 0.0,  {0.0, 45.0, 0.0, -60.0, 0.0, 45.0, 0.0}},
-            {0.0, 1.0, 0.0, {30.0, 30.0, 0.0, -75.0, 0.0, 30.0, 0.0}},
+            {1.0, 1.0, 0.0,   {0.0, 45.0, 0.0, -60.0, 0.0, 45.0, 0.0}},
+            {0.0, 1.0, 0.0,   {30.0, 30.0, 0.0, -75.0, 0.0, 30.0, 0.0}},
             {0.0, 0.0, 0.0,   {0.0, 0.0, 0.0, -90.0, 0.0, 0.0, 0.0}}
         };
 
@@ -49,7 +49,7 @@ private:
         if (index >= waypoints_.size()) return;
         const auto &wp = waypoints_[index];
 
-        // 1. Reset synchronization flags and start the delay mask timer
+        // 1. Reset synchronization flags & mark dispatch timestamp to mask stale '1' signals
         base_reached_ = false;
         arm_reached_ = false;
         is_waiting_ = true;
@@ -88,15 +88,13 @@ private:
         if (!is_waiting_ || base_reached_ || current_step_ >= waypoints_.size()) return;
 
         bool is_at_target = msg->data;
+        auto elapsed_seconds = (this->now() - dispatch_time_).seconds();
 
-        if (!is_at_target) {
-            // Java set the flag to 0 (Command entered queue)
-            base_acknowledged_ = true;
-        } 
-        else if (is_at_target && base_acknowledged_) {
-            // Java set the flag back to 1 (kmp.move() unblocked & queue empty)
+        // Masking constraint: Ignore '1' for the first 0.5 seconds so we don't accidentally
+        // catch the residual '1' status from the *previous* completed waypoint.
+        if (is_at_target && elapsed_seconds > 0.5) {
             base_reached_ = true;
-            RCLCPP_INFO(this->get_logger(), "[Status] Base arrived at WP %zu (Java kmp.move() finished).", current_step_ + 1);
+            RCLCPP_INFO(this->get_logger(), "[Status] Base arrived at WP %zu (Received flag 1).", current_step_ + 1);
             checkAndProceed();
         }
     }
@@ -136,7 +134,7 @@ private:
 
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_pub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr arm_joint_pub_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr base_idle_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr base_target_sub_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
     rclcpp::TimerBase::SharedPtr init_timer_;
 

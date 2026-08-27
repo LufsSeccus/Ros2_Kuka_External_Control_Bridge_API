@@ -40,6 +40,15 @@ ament_target_dependencies(kmp_rectangle_node
   std_msgs
 )
 
+add_executable(kmp_rectangle_sequential src/kmp_rectangle_sequential.cpp)
+ament_target_dependencies(kmp_rectangle_sequential
+  rclcpp
+  geometry_msgs
+  sensor_msgs
+  std_msgs
+  tf2
+)
+
 install(TARGETS
   udp_bridge_node
   kmp_rectangle_node
