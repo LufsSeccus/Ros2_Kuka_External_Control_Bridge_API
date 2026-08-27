@@ -13,6 +13,7 @@ find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -25,11 +26,23 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
 add_executable(udp_bridge_node src/udp_bridge_node.cpp)
-ament_target_dependencies(udp_bridge_node rclcpp geometry_msgs nav_msgs tf2 tf2_ros sensor_msgs)
+ament_target_dependencies(udp_bridge_node rclcpp geometry_msgs nav_msgs tf2 tf2_ros sensor_msgs std_msgs)
+
+add_executable(kmp_rectangle_node src/kmp_rectangle_node.cpp)
+ament_target_dependencies(kmp_rectangle_node
+  rclcpp
+  geometry_msgs
+  sensor_msgs
+  tf2
+  nav_msgs
+  std_msgs
+)
 
 install(TARGETS
   udp_bridge_node
+  kmp_rectangle_node
   DESTINATION lib/${PROJECT_NAME}
 )
 ament_package()

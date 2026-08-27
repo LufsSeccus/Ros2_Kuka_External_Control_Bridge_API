@@ -1,4 +1,4 @@
-#include <chrono>
+ #include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -18,6 +18,7 @@
 #include <fcntl.h>
 
 // ROS2 Headers
+#include "std_msgs/msg/bool.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/odometry.hpp"
@@ -50,6 +51,8 @@ public:
         // 3. ROS2 Publishers
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
         joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
+        // 3. ROS2 Publishers (Add this next to odom_pub_ and joint_pub_)
+        base_target_pub_ = this->create_publisher<std_msgs::msg::Bool>("/base_target_reached", 10);
 
         // 4. ROS2 Subscriptions
         cmd_vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
@@ -391,6 +394,13 @@ private:
                     joint_pub_->publish(joint_msg);
                 }
             }
+            // 3. Base Idle Status Processing
+            if (parts.size() >= 6) {
+                auto reached_msg = std_msgs::msg::Bool();
+                // Safer check: look for the "1" char anywhere in the substring
+                reached_msg.data = (parts[5].find("1") != std::string::npos); 
+                base_target_pub_->publish(reached_msg);
+            }
 
         } catch (const std::exception& e) {
             RCLCPP_ERROR_THROTTLE(
@@ -414,12 +424,13 @@ private:
     // ROS2 Interfaces
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr base_target_pub_;
 
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr arm_joint_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr arm_pose_sub_;
-
+    
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     // Multithreading
