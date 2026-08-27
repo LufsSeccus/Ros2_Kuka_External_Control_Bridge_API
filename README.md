@@ -4,7 +4,7 @@ A lightweight ROS 2 bridge for controlling a **KUKA KMR iiwa 14 R820** running *
 
 This project implements a custom communication layer between ROS 2 and a Sunrise Java application, allowing ROS 2 nodes to command the robot through the RoboticsAPI.
 
-> **Project Status:** 🚧 Under Development
+> **Project Status:** Maintainance/Debugging
 
 ---
 
