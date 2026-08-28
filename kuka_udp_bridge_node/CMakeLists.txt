@@ -52,6 +52,7 @@ ament_target_dependencies(kmp_rectangle_sequential
 install(TARGETS
   udp_bridge_node
   kmp_rectangle_node
+  kmp_rectangle_sequential
   DESTINATION lib/${PROJECT_NAME}
 )
 ament_package()
