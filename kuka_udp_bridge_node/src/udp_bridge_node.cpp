@@ -33,6 +33,8 @@ using namespace std::chrono_literals;
 class KukaUdpBridge : public rclcpp::Node {
 public:
     KukaUdpBridge() : Node("kuka_udp_bridge"), tx_counter_(0), last_base_reached_state_(true) {
+        this->declare_parameter<std::string>("network_interface", "");
+        network_interface_ = this->get_parameter("network_interface").as_string();
         this->declare_parameter<std::string>("robot_ip", "172.31.1.10");
         this->declare_parameter<int>("robot_port", 30300);
         this->declare_parameter<int>("client_port", 30333);
@@ -95,7 +97,18 @@ private:
             RCLCPP_FATAL(this->get_logger(), "Failed to create UDP socket!");
             throw std::runtime_error("Socket creation failed");
         }
-
+        // --- NEW: Hardware-level socket binding ---
+        if (!network_interface_.empty()) {
+            if (setsockopt(sock_fd_, SOL_SOCKET, SO_BINDTODEVICE, network_interface_.c_str(), network_interface_.length()) < 0) {
+                RCLCPP_ERROR(this->get_logger(), 
+                    "Failed to bind to hardware interface %s. Did you run the setcap command?", 
+                    network_interface_.c_str());
+            } else {
+                RCLCPP_INFO(this->get_logger(), 
+                    ">>> Socket hardware-bound strictly to interface: %s <<<", 
+                    network_interface_.c_str());
+            }
+        }
         struct sockaddr_in local_addr;
         memset(&local_addr, 0, sizeof(local_addr));
         local_addr.sin_family = AF_INET;
@@ -362,6 +375,7 @@ private:
     int sock_fd_ = -1;
     struct sockaddr_in robot_addr_;
     std::string robot_ip_;
+    std::string network_interface_;
     int robot_port_;
     int client_port_;
     long tx_counter_;
