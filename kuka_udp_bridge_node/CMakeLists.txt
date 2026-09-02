@@ -55,4 +55,8 @@ install(TARGETS
   kmp_rectangle_sequential
   DESTINATION lib/${PROJECT_NAME}
 )
+
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}/
+)
 ament_package()

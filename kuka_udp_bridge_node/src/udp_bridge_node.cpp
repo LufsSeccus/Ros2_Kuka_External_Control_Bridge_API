@@ -33,6 +33,8 @@ using namespace std::chrono_literals;
 class KukaUdpBridge : public rclcpp::Node {
 public:
     KukaUdpBridge() : Node("kuka_udp_bridge"), tx_counter_(0), last_base_reached_state_(true) {
+        this->declare_parameter<std::string>("network_interface", "eth0");
+        network_interface_ = this->get_parameter("network_interface").as_string();
         this->declare_parameter<std::string>("robot_ip", "172.31.1.10");
         this->declare_parameter<int>("robot_port", 30300);
         this->declare_parameter<int>("client_port", 30333);
@@ -46,21 +48,21 @@ public:
 
         setup_sockets();
 
-        odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
-        joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
-        base_target_pub_ = this->create_publisher<std_msgs::msg::Bool>("/base_target_reached", 10);
+        odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
+        joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("joint_states", 10);
+        base_target_pub_ = this->create_publisher<std_msgs::msg::Bool>("base_target_reached", 10);
 
         cmd_vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
-            "/cmd_vel", 10, std::bind(&KukaUdpBridge::cmd_vel_callback, this, std::placeholders::_1));
+            "cmd_vel", 10, std::bind(&KukaUdpBridge::cmd_vel_callback, this, std::placeholders::_1));
 
         goal_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-            "/goal_pose", 10, std::bind(&KukaUdpBridge::goal_pose_callback, this, std::placeholders::_1));
+            "goal_pose", 10, std::bind(&KukaUdpBridge::goal_pose_callback, this, std::placeholders::_1));
 
         arm_joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-            "/arm_cmd_joints", 10, std::bind(&KukaUdpBridge::arm_joint_callback, this, std::placeholders::_1));
+            "arm_cmd_joints", 10, std::bind(&KukaUdpBridge::arm_joint_callback, this, std::placeholders::_1));
 
         arm_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-            "/arm_goal_pose", 10, std::bind(&KukaUdpBridge::arm_pose_callback, this, std::placeholders::_1));
+            "arm_goal_pose", 10, std::bind(&KukaUdpBridge::arm_pose_callback, this, std::placeholders::_1));
 
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
@@ -95,7 +97,18 @@ private:
             RCLCPP_FATAL(this->get_logger(), "Failed to create UDP socket!");
             throw std::runtime_error("Socket creation failed");
         }
-
+        // --- NEW: Hardware-level socket binding ---
+        if (!network_interface_.empty()) {
+            if (setsockopt(sock_fd_, SOL_SOCKET, SO_BINDTODEVICE, network_interface_.c_str(), network_interface_.length()) < 0) {
+                RCLCPP_ERROR(this->get_logger(), 
+                    "Failed to bind to hardware interface %s. Did you run the setcap command?", 
+                    network_interface_.c_str());
+            } else {
+                RCLCPP_INFO(this->get_logger(), 
+                    ">>> Socket hardware-bound strictly to interface: %s <<<", 
+                    network_interface_.c_str());
+            }
+        }
         struct sockaddr_in local_addr;
         memset(&local_addr, 0, sizeof(local_addr));
         local_addr.sin_family = AF_INET;
@@ -362,6 +375,7 @@ private:
     int sock_fd_ = -1;
     struct sockaddr_in robot_addr_;
     std::string robot_ip_;
+    std::string network_interface_;
     int robot_port_;
     int client_port_;
     long tx_counter_;
