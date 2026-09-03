@@ -33,7 +33,11 @@ using namespace std::chrono_literals;
 class KukaUdpBridge : public rclcpp::Node {
 public:
     KukaUdpBridge() : Node("kuka_udp_bridge"), tx_counter_(0), last_base_reached_state_(true) {
+<<<<<<< HEAD
         this->declare_parameter<std::string>("network_interface", "");
+=======
+        this->declare_parameter<std::string>("network_interface", "eth0");
+>>>>>>> 51927bc3690c9f62b054033efb1204bdd45885fe
         network_interface_ = this->get_parameter("network_interface").as_string();
         this->declare_parameter<std::string>("robot_ip", "172.31.1.10");
         this->declare_parameter<int>("robot_port", 30300);
@@ -48,21 +52,21 @@ public:
 
         setup_sockets();
 
-        odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
-        joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
-        base_target_pub_ = this->create_publisher<std_msgs::msg::Bool>("/base_target_reached", 10);
+        odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
+        joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("joint_states", 10);
+        base_target_pub_ = this->create_publisher<std_msgs::msg::Bool>("base_target_reached", 10);
 
         cmd_vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
-            "/cmd_vel", 10, std::bind(&KukaUdpBridge::cmd_vel_callback, this, std::placeholders::_1));
+            "cmd_vel", 10, std::bind(&KukaUdpBridge::cmd_vel_callback, this, std::placeholders::_1));
 
         goal_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-            "/goal_pose", 10, std::bind(&KukaUdpBridge::goal_pose_callback, this, std::placeholders::_1));
+            "goal_pose", 10, std::bind(&KukaUdpBridge::goal_pose_callback, this, std::placeholders::_1));
 
         arm_joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-            "/arm_cmd_joints", 10, std::bind(&KukaUdpBridge::arm_joint_callback, this, std::placeholders::_1));
+            "arm_cmd_joints", 10, std::bind(&KukaUdpBridge::arm_joint_callback, this, std::placeholders::_1));
 
         arm_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-            "/arm_goal_pose", 10, std::bind(&KukaUdpBridge::arm_pose_callback, this, std::placeholders::_1));
+            "arm_goal_pose", 10, std::bind(&KukaUdpBridge::arm_pose_callback, this, std::placeholders::_1));
 
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 

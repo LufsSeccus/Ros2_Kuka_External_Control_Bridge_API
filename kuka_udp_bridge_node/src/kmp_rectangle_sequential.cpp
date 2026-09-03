@@ -21,14 +21,14 @@ struct Waypoint {
 class KmpRectangleSequential : public rclcpp::Node {
 public:
     KmpRectangleSequential() : Node("kmp_rectangle_sequential"), current_step_(0), current_state_(State::WAITING_FOR_INIT) {
-        goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/goal_pose", 10);
-        arm_joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/arm_cmd_joints", 10);
+        goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("goal_pose", 10);
+        arm_joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("arm_cmd_joints", 10);
 
         base_target_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-            "/base_target_reached", 10, std::bind(&KmpRectangleSequential::baseReachedCallback, this, std::placeholders::_1));
+            "base_target_reached", 10, std::bind(&KmpRectangleSequential::baseReachedCallback, this, std::placeholders::_1));
             
         joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-            "/joint_states", 10, std::bind(&KmpRectangleSequential::jointStateCallback, this, std::placeholders::_1));
+            "joint_states", 10, std::bind(&KmpRectangleSequential::jointStateCallback, this, std::placeholders::_1));
 
         waypoints_ = {
             {1.0, 0.0, 0.0,   {0.0, 20.0, 0.0, -90.0, 0.0, 60.0, 0.0}},
