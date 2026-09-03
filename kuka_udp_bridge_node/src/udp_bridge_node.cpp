@@ -33,11 +33,8 @@ using namespace std::chrono_literals;
 class KukaUdpBridge : public rclcpp::Node {
 public:
     KukaUdpBridge() : Node("kuka_udp_bridge"), tx_counter_(0), last_base_reached_state_(true) {
-<<<<<<< HEAD
-        this->declare_parameter<std::string>("network_interface", "");
-=======
+
         this->declare_parameter<std::string>("network_interface", "eth0");
->>>>>>> 51927bc3690c9f62b054033efb1204bdd45885fe
         network_interface_ = this->get_parameter("network_interface").as_string();
         this->declare_parameter<std::string>("robot_ip", "172.31.1.10");
         this->declare_parameter<int>("robot_port", 30300);
