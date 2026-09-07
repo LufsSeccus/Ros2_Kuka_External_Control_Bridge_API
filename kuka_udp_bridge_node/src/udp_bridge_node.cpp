@@ -98,7 +98,6 @@ private:
             RCLCPP_FATAL(this->get_logger(), "Failed to create UDP socket!");
             throw std::runtime_error("Socket creation failed");
         }
-        // --- NEW: Hardware-level socket binding ---
         if (!network_interface_.empty()) {
             if (setsockopt(sock_fd_, SOL_SOCKET, SO_BINDTODEVICE, network_interface_.c_str(), network_interface_.length()) < 0) {
                 RCLCPP_ERROR(this->get_logger(), 
@@ -200,8 +199,18 @@ private:
         std::tm parts;
         localtime_r(&now_c, &parts);
 
+        std::string ns = this->get_namespace();
+        if (!ns.empty() && ns[0] == '/') {
+            ns = ns.substr(1);
+        }
+        if (ns.empty()) {
+            ns = "Default";
+        } else {
+            ns[0] = std::toupper(ns[0]);
+        }
+
         std::ostringstream oss;
-        oss << "kuka_log/logger_bridge_file_" 
+        oss << "kuka_log/" << ns << "_log_" 
             << std::put_time(&parts, "%H-%M_%d-%m-%Y") 
             << ".csv";
         return oss.str();
@@ -289,8 +298,6 @@ private:
         if (parts.size() < 4) return;
 
         try {
-            // 1. Base Pose & Flag Processing from parts[3]
-            // Format: X,Y,Alpha,baseTargetReached
             std::vector<double> base_data;
             std::stringstream base_ss(parts[3]);
             std::string val;
@@ -301,9 +308,8 @@ private:
             if (base_data.size() >= 3) {
                 double x_m = base_data[0] / 1000.0;
                 double y_m = base_data[1] / 1000.0;
-                double yaw_rad = base_data[2] *(M_PI / 180.0);
+                double yaw_rad = base_data[2] * (M_PI / 180.0);
 
-                // Publish Odometry
                 auto odom_msg = nav_msgs::msg::Odometry();
                 odom_msg.header.stamp = this->now();
                 odom_msg.header.frame_id = "odom";
@@ -328,9 +334,8 @@ private:
                 tf_broadcaster_->sendTransform(tf_msg);
             }
 
-            // Extract baseTargetReached if it's the 4th comma-separated value in base_data (index 3)
             if (base_data.size() >= 4) {
-                bool current_reached_state = (base_data[3] >= 0.5); // 1.0 means reached, 0.0 means moving
+                bool current_reached_state = (base_data[3] >= 0.5);
 
                 if (current_reached_state != last_base_reached_state_) {
                     RCLCPP_INFO(this->get_logger(), 
@@ -344,7 +349,6 @@ private:
                 base_target_pub_->publish(reached_msg);
             }
 
-            // 2. LBR Joint State Processing (Parts[4] is the arm payload)
             if (parts.size() >= 5) {
                 std::vector<double> arm_joints_deg;
                 std::stringstream arm_ss(parts[4]);
@@ -373,6 +377,7 @@ private:
                 "[KUKA Telemetry Parse Error] %s", e.what());
         }
     }
+
     int sock_fd_ = -1;
     struct sockaddr_in robot_addr_;
     std::string robot_ip_;
