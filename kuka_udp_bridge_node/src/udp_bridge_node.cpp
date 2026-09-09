@@ -17,8 +17,10 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-// ROS2 Headers
+// ROS 2 Headers
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/float64.hpp"
+#include "std_msgs/msg/float64_multi_array.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/odometry.hpp"
@@ -52,6 +54,7 @@ public:
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
         joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("joint_states", 10);
         base_target_pub_ = this->create_publisher<std_msgs::msg::Bool>("base_target_reached", 10);
+        ee_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("ee_pose_state", 10);
 
         cmd_vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
             "cmd_vel", 10, std::bind(&KukaUdpBridge::cmd_vel_callback, this, std::placeholders::_1));
@@ -64,6 +67,12 @@ public:
 
         arm_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
             "arm_goal_pose", 10, std::bind(&KukaUdpBridge::arm_pose_callback, this, std::placeholders::_1));
+
+        arm_speed_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
+            "arm_speed", 10, std::bind(&KukaUdpBridge::arm_speed_callback, this, std::placeholders::_1));
+
+        base_speed_sub_ = this->create_subscription<std_msgs::msg::Float64>(
+            "base_speed", 10, std::bind(&KukaUdpBridge::base_speed_callback, this, std::placeholders::_1));
 
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
@@ -95,18 +104,11 @@ private:
     void setup_sockets() {
         sock_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
         if (sock_fd_ < 0) {
-            RCLCPP_FATAL(this->get_logger(), "Failed to create UDP socket!");
             throw std::runtime_error("Socket creation failed");
         }
         if (!network_interface_.empty()) {
             if (setsockopt(sock_fd_, SOL_SOCKET, SO_BINDTODEVICE, network_interface_.c_str(), network_interface_.length()) < 0) {
-                RCLCPP_ERROR(this->get_logger(), 
-                    "Failed to bind to hardware interface %s. Did you run the setcap command?", 
-                    network_interface_.c_str());
-            } else {
-                RCLCPP_INFO(this->get_logger(), 
-                    ">>> Socket hardware-bound strictly to interface: %s <<<", 
-                    network_interface_.c_str());
+                RCLCPP_ERROR(this->get_logger(), "Failed to bind to hardware interface %s", network_interface_.c_str());
             }
         }
         struct sockaddr_in local_addr;
@@ -116,7 +118,6 @@ private:
         local_addr.sin_port = htons(client_port_);
 
         if (bind(sock_fd_, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) {
-            RCLCPP_FATAL(this->get_logger(), "Failed to bind UDP socket to port %d!", client_port_);
             throw std::runtime_error("Socket bind failed");
         }
 
@@ -130,13 +131,29 @@ private:
         tx_counter_++;
         auto now = std::chrono::system_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-
         std::stringstream ss;
         ss << ms << ";" << tx_counter_ << ";" << command << ";" << value;
         std::string payload = ss.str();
+        sendto(sock_fd_, payload.c_str(), payload.length(), 0, (struct sockaddr *)&robot_addr_, sizeof(robot_addr_));
+    }
 
-        sendto(sock_fd_, payload.c_str(), payload.length(), 0,
-               (struct sockaddr *)&robot_addr_, sizeof(robot_addr_));
+    void arm_speed_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+        if (msg->data.size() < 7) {
+            RCLCPP_WARN(this->get_logger(), "Arm speed requires exactly 7 values.");
+            return;
+        }
+        std::stringstream ss;
+        for (size_t i = 0; i < 7; ++i) {
+            ss << msg->data[i];
+            if (i < 6) ss << ",";
+        }
+        send_to_robot("Set_Arm_Speed", ss.str());
+    }
+
+    void base_speed_callback(const std_msgs::msg::Float64::SharedPtr msg) {
+        std::stringstream ss;
+        ss << msg->data;
+        send_to_robot("Set_Base_Speed", ss.str());
     }
 
     void cmd_vel_callback(const geometry_msgs::msg::Twist::SharedPtr msg) {
@@ -148,16 +165,10 @@ private:
     void goal_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
         double x_mm = msg->pose.position.x * 1000.0;
         double y_mm = msg->pose.position.y * 1000.0;
-
-        tf2::Quaternion q(
-            msg->pose.orientation.x,
-            msg->pose.orientation.y,
-            msg->pose.orientation.z,
-            msg->pose.orientation.w);
+        tf2::Quaternion q(msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z, msg->pose.orientation.w);
         double roll, pitch, yaw;
         tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
         double alpha_deg = yaw * (180.0 / M_PI);
-
         std::stringstream ss;
         ss << x_mm << "," << y_mm << "," << alpha_deg;
         send_to_robot("Set_Pose", ss.str());
@@ -177,19 +188,12 @@ private:
         double x_m = msg->pose.position.x;
         double y_m = msg->pose.position.y;
         double z_m = msg->pose.position.z;
-
-        tf2::Quaternion q(
-            msg->pose.orientation.x,
-            msg->pose.orientation.y,
-            msg->pose.orientation.z,
-            msg->pose.orientation.w);
+        tf2::Quaternion q(msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z, msg->pose.orientation.w);
         double roll_rad, pitch_rad, yaw_rad;
         tf2::Matrix3x3(q).getRPY(roll_rad, pitch_rad, yaw_rad);
-
         std::stringstream ss;
         ss << x_m << "," << y_m << "," << z_m << ","
            << yaw_rad << "," << pitch_rad << "," << roll_rad;
-
         send_to_robot("Set_Arm_End_Effector", ss.str());
     }
 
@@ -200,19 +204,13 @@ private:
         localtime_r(&now_c, &parts);
 
         std::string ns = this->get_namespace();
-        if (!ns.empty() && ns[0] == '/') {
-            ns = ns.substr(1);
-        }
-        if (ns.empty()) {
-            ns = "Default";
-        } else {
-            ns[0] = std::toupper(ns[0]);
-        }
+        if (!ns.empty() && ns[0] == '/') ns = ns.substr(1);
+        if (ns.empty()) ns = "Default";
+        else ns[0] = std::toupper(ns[0]);
 
         std::ostringstream oss;
         oss << "kuka_log/" << ns << "_log_" 
-            << std::put_time(&parts, "%H-%M_%d-%m-%Y") 
-            << ".csv";
+            << std::put_time(&parts, "%H-%M_%d-%m-%Y") << ".csv";
         return oss.str();
     }
 
@@ -221,10 +219,8 @@ private:
             uint64_t raw_ms = std::stoull(raw_ts_str);
             std::time_t sec = static_cast<std::time_t>(raw_ms / 1000);
             uint32_t remainder_ms = static_cast<uint32_t>(raw_ms % 1000);
-
             std::tm parts;
             localtime_r(&sec, &parts);
-
             std::ostringstream oss;
             oss << std::put_time(&parts, "%Y-%m-%d %H:%M:%S")
                 << "." << std::setfill('0') << std::setw(3) << remainder_ms;
@@ -238,9 +234,7 @@ private:
         char rx_buf[1024];
         struct sockaddr_in sender_addr;
         socklen_t sender_len = sizeof(sender_addr);
-
         fcntl(sock_fd_, F_SETFL, O_NONBLOCK);
-        RCLCPP_INFO(this->get_logger(), "[KUKA UDP RX] Thread spawned. Listening for status payloads...");
 
         while (rx_thread_active_ && rclcpp::ok()) {
             memset(rx_buf, 0, sizeof(rx_buf));
@@ -254,11 +248,10 @@ private:
                 if (!is_logging_started_) {
                     std::string filename = get_log_filename();
                     telemetry_log_file_.open(filename, std::ios::out | std::ios::app);
-
                     if (telemetry_log_file_.is_open()) {
-                        telemetry_log_file_ << "Timestamp,ErrorCode,Counter,"
-                                            << "KMP_X,KMP_Y,KMP_Alpha,BaseTargetReached,"
-                                            << "Arm_J1,Arm_J2,Arm_J3,Arm_J4,Arm_J5,Arm_J6,Arm_J7\n";
+                        telemetry_log_file_ << "Timestamp,ErrorCode,Counter,KMP_X,KMP_Y,KMP_Alpha,BaseTargetReached,"
+                                            << "Arm_J1,Arm_J2,Arm_J3,Arm_J4,Arm_J5,Arm_J6,Arm_J7,"
+                                            << "EE_X,EE_Y,EE_Z,EE_A,EE_B,EE_C\n";
                         is_logging_started_ = true;
                     }
                 }
@@ -269,16 +262,11 @@ private:
                     size_t first_comma = csv_line.find(',');
                     if (first_comma != std::string::npos) {
                         std::string raw_ts = csv_line.substr(0, first_comma);
-                        std::string readable_ts = format_raw_timestamp(raw_ts);
-                        csv_line = readable_ts + csv_line.substr(first_comma);
+                        csv_line = format_raw_timestamp(raw_ts) + csv_line.substr(first_comma);
                     }
                     telemetry_log_file_ << csv_line << "\n";
                     telemetry_log_file_.flush();
                 }
-
-                RCLCPP_INFO_THROTTLE(
-                    this->get_logger(), *this->get_clock(), 1000,
-                    "[KUKA Telemetry RX] Raw Payload: %s", msg.c_str());
 
                 parse_and_publish_telemetry(msg);
             } else {
@@ -294,16 +282,14 @@ private:
         while (std::getline(ss, item, ';')) {
             parts.push_back(item);
         }
-
         if (parts.size() < 4) return;
 
         try {
+            // 1. KMP Base Tracking
             std::vector<double> base_data;
             std::stringstream base_ss(parts[3]);
             std::string val;
-            while (std::getline(base_ss, val, ',')) {
-                base_data.push_back(std::stod(val));
-            }
+            while (std::getline(base_ss, val, ',')) base_data.push_back(std::stod(val));
 
             if (base_data.size() >= 3) {
                 double x_m = base_data[0] / 1000.0;
@@ -336,46 +322,56 @@ private:
 
             if (base_data.size() >= 4) {
                 bool current_reached_state = (base_data[3] >= 0.5);
-
                 if (current_reached_state != last_base_reached_state_) {
-                    RCLCPP_INFO(this->get_logger(), 
-                        ">>> [KMP STATE CHANGE] Target Reached Flag: %s <<<", 
-                        current_reached_state ? "YES (1 - Reached)" : "NO (0 - Moving)");
                     last_base_reached_state_ = current_reached_state;
                 }
-
                 auto reached_msg = std_msgs::msg::Bool();
                 reached_msg.data = current_reached_state; 
                 base_target_pub_->publish(reached_msg);
             }
 
+            // 2. LBR Joint Angle Tracking
             if (parts.size() >= 5) {
                 std::vector<double> arm_joints_deg;
                 std::stringstream arm_ss(parts[4]);
-                while (std::getline(arm_ss, val, ',')) {
-                    arm_joints_deg.push_back(std::stod(val));
-                }
+                while (std::getline(arm_ss, val, ',')) arm_joints_deg.push_back(std::stod(val));
 
                 if (arm_joints_deg.size() >= 7) {
                     auto joint_msg = sensor_msgs::msg::JointState();
                     joint_msg.header.stamp = this->now();
-                    joint_msg.name = {
-                        "lbr_joint_1", "lbr_joint_2", "lbr_joint_3",
-                        "lbr_joint_4", "lbr_joint_5", "lbr_joint_6", "lbr_joint_7"
-                    };
-
-                    for (int i = 0; i < 7; ++i) {
-                        joint_msg.position.push_back(arm_joints_deg[i] * (M_PI / 180.0));
-                    }
+                    joint_msg.name = {"lbr_joint_1", "lbr_joint_2", "lbr_joint_3", "lbr_joint_4", "lbr_joint_5", "lbr_joint_6", "lbr_joint_7"};
+                    for (int i = 0; i < 7; ++i) joint_msg.position.push_back(arm_joints_deg[i] * (M_PI / 180.0));
                     joint_pub_->publish(joint_msg);
                 }
             }
 
-        } catch (const std::exception& e) {
-            RCLCPP_ERROR_THROTTLE(
-                this->get_logger(), *this->get_clock(), 2000,
-                "[KUKA Telemetry Parse Error] %s", e.what());
-        }
+            // 3. LBR End-Effector Tracking
+            if (parts.size() >= 6) {
+                std::vector<double> ee_data;
+                std::stringstream ee_ss(parts[5]);
+                while (std::getline(ee_ss, val, ',')) ee_data.push_back(std::stod(val));
+
+                if (ee_data.size() >= 6) {
+                    auto ee_msg = geometry_msgs::msg::PoseStamped();
+                    ee_msg.header.stamp = this->now();
+                    ee_msg.header.frame_id = "lbr_link_0";
+                    
+                    ee_msg.pose.position.x = ee_data[0] / 1000.0;
+                    ee_msg.pose.position.y = ee_data[1] / 1000.0;
+                    ee_msg.pose.position.z = ee_data[2] / 1000.0;
+
+                    tf2::Quaternion q;
+                    q.setRPY(ee_data[5], ee_data[4], ee_data[3]); 
+                    
+                    ee_msg.pose.orientation.x = q.x();
+                    ee_msg.pose.orientation.y = q.y();
+                    ee_msg.pose.orientation.z = q.z();
+                    ee_msg.pose.orientation.w = q.w();
+
+                    ee_pose_pub_->publish(ee_msg);
+                }
+            }
+        } catch (...) {}
     }
 
     int sock_fd_ = -1;
@@ -385,21 +381,22 @@ private:
     int robot_port_;
     int client_port_;
     long tx_counter_;
-
     std::ofstream telemetry_log_file_;
     bool is_logging_started_ = false;
 
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr base_target_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr ee_pose_pub_;
 
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr arm_joint_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr arm_pose_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr arm_speed_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr base_speed_sub_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-
     std::thread rx_thread_;
     std::atomic<bool> rx_thread_active_;
     bool last_base_reached_state_; 
