@@ -49,10 +49,22 @@ ament_target_dependencies(kmp_rectangle_sequential
   tf2
 )
 
+add_executable(badminton_demo_node src/badminton_demo_node.cpp)
+ament_target_dependencies(badminton_demo_node
+  rclcpp
+  geometry_msgs
+  sensor_msgs
+  std_msgs
+  tf2
+)
+
 install(TARGETS
   udp_bridge_node
   kmp_rectangle_node
   kmp_rectangle_sequential
+  badminton_demo_node
+
+  
   DESTINATION lib/${PROJECT_NAME}
 )
 

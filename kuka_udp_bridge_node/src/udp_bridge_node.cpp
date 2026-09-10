@@ -268,6 +268,11 @@ private:
                     telemetry_log_file_.flush();
                 }
 
+                // --- RESTORED: Print raw telemetry to terminal once per second ---
+                RCLCPP_INFO_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 1000,
+                    "[KUKA Telemetry RX] Raw Payload: %s", msg.c_str());
+
                 parse_and_publish_telemetry(msg);
             } else {
                 std::this_thread::sleep_for(2ms);
@@ -371,7 +376,12 @@ private:
                     ee_pose_pub_->publish(ee_msg);
                 }
             }
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            // --- UPDATED: Print parsing errors instead of hiding them ---
+            RCLCPP_ERROR_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "[Telemetry Parse Error] %s", e.what());
+        }
     }
 
     int sock_fd_ = -1;
