@@ -67,13 +67,22 @@ ament_target_dependencies(badminton_demo_node
   tf2
 )
 
+add_executable(Set_speed src/Set_speed.cpp)
+ament_target_dependencies(Set_speed
+  rclcpp
+  geometry_msgs
+  sensor_msgs
+  std_msgs
+  tf2
+)
+
 install(TARGETS
   udp_bridge_node
   kmp_rectangle_node
   kmp_rectangle_sequential
   badminton_demo_node
   Arm_homing
-  
+  Set_speed 
   DESTINATION lib/${PROJECT_NAME}
 )
 
