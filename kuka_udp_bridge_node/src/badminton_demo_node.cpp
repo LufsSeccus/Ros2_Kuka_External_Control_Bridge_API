@@ -25,6 +25,8 @@ enum class TurnState {
     WAIT_BASE_RETURN,
     START_DANCE,
     WAIT_DANCE_STEP,
+    START_RETURN,
+    WAIT_RETURN_STEP,
     DONE
 };
 
@@ -115,7 +117,7 @@ public:
         idle_pos_dist_ = std::uniform_real_distribution<double>(-0.15, 0.15);
         idle_yaw_dist_ = std::uniform_real_distribution<double>(-5.0, 5.0);
 
-        // Dance Arm random jitter (+/- 15 degrees)
+        // Dance Arm random jitter (+/- 15 degrees around homing state)
         arm_dance_dist_ = std::uniform_real_distribution<double>(-15.0, 15.0);
 
         // Initial delay to connect
@@ -171,7 +173,8 @@ private:
     }
 
     std::vector<double> getRandomDanceArm() {
-        std::vector<double> dance_arm = ready_state_;
+        // Base random variations around homing_state_ instead of ready_state_
+        std::vector<double> dance_arm = homing_state_;
         for (size_t i = 0; i < 7; ++i) {
             dance_arm[i] += arm_dance_dist_(generator_);
         }
@@ -194,7 +197,7 @@ private:
 
             case TurnState::START_TURN: {
                 if (turn_count_ >= max_turns_) {
-                    RCLCPP_INFO(this->get_logger(), "=== RALLY COMPLETE! STARTING VICTORY DANCE (5.2m total, -0.4m/step) ===");
+                    RCLCPP_INFO(this->get_logger(), "=== RALLY COMPLETE! STARTING DANCE (R1 -> +2.6m | R2 -> -2.6m with 180 deg CW rotation) ===");
                     demo_state_ = TurnState::START_DANCE;
                     dance_step_count_ = 0;
                     r1_dance_x_ = 0.0; r1_dance_yaw_ = 0.0;
@@ -276,12 +279,10 @@ private:
             }
 
             case TurnState::START_DANCE: {
-                if (dance_step_count_ >= total_dance_steps_) {
-                    RCLCPP_INFO(this->get_logger(), "=== VICTORY DANCE COMPLETE! HOMING AND EXITING ===");
-                    demo_state_ = TurnState::DONE;
-                    commandArm(1, homing_state_);
-                    commandArm(2, homing_state_);
-                    rclcpp::shutdown();
+                if (r1_dance_x_ >= 2.6 && r2_dance_x_ <= -2.6) {
+                    RCLCPP_INFO(this->get_logger(), "=== OUTWARD DANCE COMPLETE (R1: +2.6m, R2: -2.6m). STARTING RETURN PHASE (Fixed Yaw) ===");
+                    demo_state_ = TurnState::START_RETURN;
+                    advanceFSM();
                     return;
                 }
 
@@ -289,14 +290,19 @@ private:
                 demo_state_ = TurnState::WAIT_DANCE_STEP;
                 dance_step_count_++;
 
-                // Step parameters: -0.4m X direction, -180 deg CW rotation per step
-                r1_dance_x_ -= 0.4; r1_dance_yaw_ -= 180.0;
-                r2_dance_x_ -= 0.4; r2_dance_yaw_ -= 180.0;
+                // Robot 1: +0.4m per step, -180 deg CW rotation
+                r1_dance_x_ += 0.4;
+                if (r1_dance_x_ > 2.6) r1_dance_x_ = 2.6;
+                r1_dance_yaw_ -= 180.0;
 
-                RCLCPP_INFO(this->get_logger(), "[Dance Step %d/%d] Moving X: %0.1fm | Yaw: %0.0f deg | Random Arms", 
-                            dance_step_count_, total_dance_steps_, r1_dance_x_, r1_dance_yaw_);
+                // Robot 2: -0.4m per step, -180 deg CW rotation
+                r2_dance_x_ -= 0.4;
+                if (r2_dance_x_ < -2.6) r2_dance_x_ = -2.6;
+                r2_dance_yaw_ -= 180.0;
 
-                // Dispatch both bases and both random arms together
+                RCLCPP_INFO(this->get_logger(), "[Dance Step Out %d] R1 X: %0.2fm | R2 X: %0.2fm | Yaw: %0.0f deg | Homing-Based Random Arms", 
+                            dance_step_count_, r1_dance_x_, r2_dance_x_, r1_dance_yaw_);
+
                 commandBase(1, r1_dance_x_, 0.0, r1_dance_yaw_);
                 commandBase(2, r2_dance_x_, 0.0, r2_dance_yaw_);
 
@@ -306,9 +312,48 @@ private:
             }
 
             case TurnState::WAIT_DANCE_STEP: {
-                // Wait for BOTH robots (both bases and both arms) to complete current dance step
                 if (r1_base_reached_ && r1_arm_reached_ && r2_base_reached_ && r2_arm_reached_) {
                     demo_state_ = TurnState::START_DANCE;
+                    advanceFSM();
+                }
+                break;
+            }
+
+            case TurnState::START_RETURN: {
+                if (r1_dance_x_ <= 0.0 && r2_dance_x_ >= 0.0) {
+                    RCLCPP_INFO(this->get_logger(), "=== RETURN PHASE COMPLETE (Both back at 0.0m). HOMING AND EXITING ===");
+                    demo_state_ = TurnState::DONE;
+                    commandArm(1, homing_state_);
+                    commandArm(2, homing_state_);
+                    rclcpp::shutdown();
+                    return;
+                }
+
+                resetFlags();
+                demo_state_ = TurnState::WAIT_RETURN_STEP;
+
+                // Robot 1: -0.4m per step back to 0.0, fixed yaw
+                r1_dance_x_ -= 0.4;
+                if (r1_dance_x_ < 0.0) r1_dance_x_ = 0.0;
+
+                // Robot 2: +0.4m per step back to 0.0, fixed yaw
+                r2_dance_x_ += 0.4;
+                if (r2_dance_x_ > 0.0) r2_dance_x_ = 0.0;
+
+                RCLCPP_INFO(this->get_logger(), "[Return Step] R1 X: %0.2fm | R2 X: %0.2fm | Fixed Yaw | Homing-Based Random Arms", 
+                            r1_dance_x_, r2_dance_x_);
+
+                commandBase(1, r1_dance_x_, 0.0, r1_dance_yaw_);
+                commandBase(2, r2_dance_x_, 0.0, r2_dance_yaw_);
+
+                commandArm(1, getRandomDanceArm());
+                commandArm(2, getRandomDanceArm());
+                break;
+            }
+
+            case TurnState::WAIT_RETURN_STEP: {
+                if (r1_base_reached_ && r1_arm_reached_ && r2_base_reached_ && r2_arm_reached_) {
+                    demo_state_ = TurnState::START_RETURN;
                     advanceFSM();
                 }
                 break;
@@ -409,7 +454,6 @@ private:
 
     // Victory Dance Variables
     int dance_step_count_;
-    const int total_dance_steps_ = 13;
     double r1_dance_x_ = 0.0, r1_dance_yaw_ = 0.0;
     double r2_dance_x_ = 0.0, r2_dance_yaw_ = 0.0;
 
