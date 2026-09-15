@@ -72,7 +72,7 @@ install(TARGETS
   kmp_rectangle_node
   kmp_rectangle_sequential
   badminton_demo_node
-
+  Arm_homing
   
   DESTINATION lib/${PROJECT_NAME}
 )

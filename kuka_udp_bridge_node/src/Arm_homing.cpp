@@ -33,7 +33,7 @@ private:
         };
         
         // The standard homing position in degrees
-        std::vector<double> home_deg = {0.0, 0.0, 0.0, -90.0, 0.0, 0.0, 0.0};
+        std::vector<double> home_deg = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
         
         // Convert to radians (which is what your udp_bridge expects over ROS 2)
         for (double deg : home_deg) {
