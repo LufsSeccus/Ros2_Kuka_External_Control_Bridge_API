@@ -49,6 +49,15 @@ ament_target_dependencies(kmp_rectangle_sequential
   tf2
 )
 
+add_executable(Arm_homing src/Arm_homing.cpp)
+ament_target_dependencies(Arm_homing
+  rclcpp
+  geometry_msgs
+  sensor_msgs
+  std_msgs
+  tf2
+)
+
 add_executable(badminton_demo_node src/badminton_demo_node.cpp)
 ament_target_dependencies(badminton_demo_node
   rclcpp

@@ -13,7 +13,7 @@ def generate_launch_description():
                 '--ros-args', '-r', '__ns:=/robot1',
                 '-p', 'robot_ip:=172.31.1.10', 
                 '-p', 'client_port:=30333', 
-                '-p', 'network_interface:=eth0'
+                '-p', 'network_interface:=wlxccbabdabfa27'
             ],
             output='screen'
         ),

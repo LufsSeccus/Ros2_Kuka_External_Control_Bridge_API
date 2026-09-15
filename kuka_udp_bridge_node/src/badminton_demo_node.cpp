@@ -16,6 +16,8 @@ using namespace std::chrono_literals;
 class BadmintonDemo : public rclcpp::Node {
 public:
     BadmintonDemo() : Node("badminton_demo"), current_turn_(1) {
+        dispatch_time_1_ = this->now();
+        dispatch_time_2_ = this->now();
         // Robot 1 Publishers & Subscribers
         goal_pub_1_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/robot1/goal_pose", 10);
         arm_pub_1_  = this->create_publisher<sensor_msgs::msg::JointState>("/robot1/arm_cmd_joints", 10);
@@ -40,6 +42,8 @@ public:
             {-45.0, 20.0, 0.0, -80.0, 45.0, 30.0, 0.0},  // 3: RIGHT FLICK
             {45.0, 20.0, 0.0, -80.0, -45.0, 30.0, 0.0}   // 4: LEFT FLICK
         };
+        r1_target_joints_ = arm_states_[0];
+        r2_target_joints_ = arm_states_[0];
 
         // Initialize random generators
         unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
