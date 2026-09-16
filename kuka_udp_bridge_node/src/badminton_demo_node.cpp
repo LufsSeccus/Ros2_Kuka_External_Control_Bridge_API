@@ -70,9 +70,7 @@ public:
         joint_sub_2_      = this->create_subscription<sensor_msgs::msg::JointState>(
             "/robot2/joint_states", 10, [this](const sensor_msgs::msg::JointState::SharedPtr msg) { jointCallback(2, msg); });
 
-        // =========================================================================
-        // [ ARM STAGE CONFIGURATIONS (DEGREES) ]
-        // =========================================================================
+        // Arm Stage Configurations (Degrees)
         homing_state_ = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
         ready_state_  = {0.0, -30.0, 0.0, -114.0, 0.0, 0.0, 55.0}; 
 
@@ -104,20 +102,17 @@ public:
         r1_target_joints_ = homing_state_;
         r2_target_joints_ = homing_state_;
 
-        // Random generators
+        // Random Generators
         unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
         generator_   = std::mt19937(seed);
         strike_dist_ = std::uniform_int_distribution<int>(0, 3);
         
-        // Active Robot move limits (+/- 0.3m, +/- 15 deg)
-        pos_dist_    = std::uniform_real_distribution<double>(-0.3, 0.3);
-        yaw_dist_    = std::uniform_real_distribution<double>(-15.0, 15.0);
+        random_point_x = std::uniform_real_distribution<double>(-4.0, 4.0);
+        random_point_y = std::uniform_real_distribution<double>(0.0, 2.0);
+        yaw_dist_      = std::uniform_real_distribution<double>(-15.0, 15.0);
 
-        // Idle Robot micro-shuffle limits (+/- 0.15m, +/- 5 deg)
-        idle_pos_dist_ = std::uniform_real_distribution<double>(-0.15, 0.15);
-        idle_yaw_dist_ = std::uniform_real_distribution<double>(-5.0, 5.0);
-
-        // Dance Arm random jitter (+/- 15 degrees around homing state)
+        idle_pos_dist_  = std::uniform_real_distribution<double>(-0.15, 0.15);
+        idle_yaw_dist_  = std::uniform_real_distribution<double>(-5.0, 5.0);
         arm_dance_dist_ = std::uniform_real_distribution<double>(-15.0, 15.0);
 
         // Initial delay to connect
@@ -173,7 +168,6 @@ private:
     }
 
     std::vector<double> getRandomDanceArm() {
-        // Base random variations around homing_state_ instead of ready_state_
         std::vector<double> dance_arm = homing_state_;
         for (size_t i = 0; i < 7; ++i) {
             dance_arm[i] += arm_dance_dist_(generator_);
@@ -197,7 +191,7 @@ private:
 
             case TurnState::START_TURN: {
                 if (turn_count_ >= max_turns_) {
-                    RCLCPP_INFO(this->get_logger(), "=== RALLY COMPLETE! STARTING DANCE (R1 -> +2.6m | R2 -> -2.6m with 180 deg CW rotation) ===");
+                    RCLCPP_INFO(this->get_logger(), "=== RALLY COMPLETE! STARTING DANCE (R1 -> +2.6m | R2 -> -2.6m) ===");
                     demo_state_ = TurnState::START_DANCE;
                     dance_step_count_ = 0;
                     r1_dance_x_ = 0.0; r1_dance_yaw_ = 0.0;
@@ -220,8 +214,25 @@ private:
                 RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Dispatching Strike %d. Idle Robot %d executing micro-shuffle.", 
                             turn_count_, active_robot_, active_strike_idx_, idle_robot);
 
-                // 1. Dispatch Active Robot
-                commandBase(active_robot_, pos_dist_(generator_), pos_dist_(generator_), yaw_dist_(generator_));
+                // 1. Dispatch Active Robot with Interpolation Calculation
+                active_base_yaw_ = yaw_dist_(generator_);
+                active_base_x_   = random_point_x(generator_);
+                active_base_y_   = random_point_y(generator_);
+                double distance_goal = std::hypot(active_base_x_, active_base_y_);
+            
+                int intermediate_points = std::max(1, static_cast<int>(std::ceil(distance_goal / 1.5)));
+                double step_x   = active_base_x_ / intermediate_points;
+                double step_y   = active_base_y_ / intermediate_points;    
+                double step_yaw = active_base_yaw_ / intermediate_points;   
+
+                for (int i = 1; i <= intermediate_points; i++) {
+                    if (i == intermediate_points) {
+                        commandBase(active_robot_, active_base_x_, active_base_y_, active_base_yaw_);
+                    } else {
+                        commandBase(active_robot_, i * step_x, i * step_y, i * step_yaw);
+                    }
+                }
+                
                 commandArm(active_robot_, all_strikes_[active_strike_idx_][0]);
 
                 // 2. Dispatch Idle Robot (Micro-shuffle)
@@ -255,17 +266,31 @@ private:
 
             case TurnState::WAIT_RECOVER: {
                 if (activeArmReached()) {
-                    RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Arm recovered. Active Base returning to 0.0.", turn_count_, active_robot_);
+                    RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Arm recovered. Active Base returning to 0.0 with interpolation.", turn_count_, active_robot_);
                     resetFlags();
                     demo_state_ = TurnState::WAIT_BASE_RETURN;
-                    commandBase(active_robot_, 0.0, 0.0, 0.0);
+
+                    // Interpolated Base Return back to origin (0.0, 0.0, 0.0)
+                    double return_dist = std::hypot(active_base_x_, active_base_y_);
+                    int return_steps = std::max(1, static_cast<int>(std::ceil(return_dist / 1.5)));
+                    double ret_step_x   = active_base_x_ / return_steps;
+                    double ret_step_y   = active_base_y_ / return_steps;
+                    double ret_step_yaw = active_base_yaw_ / return_steps;
+
+                    for (int i = return_steps - 1; i >= 0; i--) {
+                        if (i == 0) {
+                            commandBase(active_robot_, 0.0, 0.0, 0.0);
+                        } else {
+                            commandBase(active_robot_, i * ret_step_x, i * ret_step_y, i * ret_step_yaw);
+                        }
+                    }
                 }
                 break;
             }
 
             case TurnState::WAIT_BASE_RETURN: {
                 if (activeBaseReached()) {
-                    RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Base returned. Ending turn.", turn_count_, active_robot_);
+                    RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Base returned to origin. Ending turn.", turn_count_, active_robot_);
                     
                     if (active_robot_ == 2) {
                         turn_count_++;
@@ -280,7 +305,7 @@ private:
 
             case TurnState::START_DANCE: {
                 if (r1_dance_x_ >= 2.6 && r2_dance_x_ <= -2.6) {
-                    RCLCPP_INFO(this->get_logger(), "=== OUTWARD DANCE COMPLETE (R1: +2.6m, R2: -2.6m). STARTING RETURN PHASE (Fixed Yaw) ===");
+                    RCLCPP_INFO(this->get_logger(), "=== OUTWARD DANCE COMPLETE (R1: +2.6m, R2: -2.6m). STARTING RETURN PHASE ===");
                     demo_state_ = TurnState::START_RETURN;
                     advanceFSM();
                     return;
@@ -290,17 +315,15 @@ private:
                 demo_state_ = TurnState::WAIT_DANCE_STEP;
                 dance_step_count_++;
 
-                // Robot 1: +0.4m per step, -180 deg CW rotation
                 r1_dance_x_ += 0.4;
                 if (r1_dance_x_ > 2.6) r1_dance_x_ = 2.6;
                 r1_dance_yaw_ -= 180.0;
 
-                // Robot 2: -0.4m per step, -180 deg CW rotation
                 r2_dance_x_ -= 0.4;
                 if (r2_dance_x_ < -2.6) r2_dance_x_ = -2.6;
                 r2_dance_yaw_ -= 180.0;
 
-                RCLCPP_INFO(this->get_logger(), "[Dance Step Out %d] R1 X: %0.2fm | R2 X: %0.2fm | Yaw: %0.0f deg | Homing-Based Random Arms", 
+                RCLCPP_INFO(this->get_logger(), "[Dance Step Out %d] R1 X: %0.2fm | R2 X: %0.2fm | Yaw: %0.0f deg", 
                             dance_step_count_, r1_dance_x_, r2_dance_x_, r1_dance_yaw_);
 
                 commandBase(1, r1_dance_x_, 0.0, r1_dance_yaw_);
@@ -332,15 +355,13 @@ private:
                 resetFlags();
                 demo_state_ = TurnState::WAIT_RETURN_STEP;
 
-                // Robot 1: -0.4m per step back to 0.0, fixed yaw
                 r1_dance_x_ -= 0.4;
                 if (r1_dance_x_ < 0.0) r1_dance_x_ = 0.0;
 
-                // Robot 2: +0.4m per step back to 0.0, fixed yaw
                 r2_dance_x_ += 0.4;
                 if (r2_dance_x_ > 0.0) r2_dance_x_ = 0.0;
 
-                RCLCPP_INFO(this->get_logger(), "[Return Step] R1 X: %0.2fm | R2 X: %0.2fm | Fixed Yaw | Homing-Based Random Arms", 
+                RCLCPP_INFO(this->get_logger(), "[Return Step] R1 X: %0.2fm | R2 X: %0.2fm | Fixed Yaw", 
                             r1_dance_x_, r2_dance_x_);
 
                 commandBase(1, r1_dance_x_, 0.0, r1_dance_yaw_);
@@ -452,6 +473,11 @@ private:
     int max_turns_;
     int active_strike_idx_;
 
+    // Target tracking for active base movement
+    double active_base_x_   = 0.0;
+    double active_base_y_   = 0.0;
+    double active_base_yaw_ = 0.0;
+
     // Victory Dance Variables
     int dance_step_count_;
     double r1_dance_x_ = 0.0, r1_dance_yaw_ = 0.0;
@@ -469,8 +495,10 @@ private:
     rclcpp::Time state_start_time_;
 
     std::mt19937 generator_;
+
     std::uniform_int_distribution<int> strike_dist_;
-    std::uniform_real_distribution<double> pos_dist_;
+    std::uniform_real_distribution<double> random_point_x;
+    std::uniform_real_distribution<double> random_point_y;
     std::uniform_real_distribution<double> yaw_dist_;
     std::uniform_real_distribution<double> idle_pos_dist_;
     std::uniform_real_distribution<double> idle_yaw_dist_;
