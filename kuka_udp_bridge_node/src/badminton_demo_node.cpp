@@ -7,12 +7,7 @@
 #include <algorithm>
 
 #include "rclcpp/rclcpp.hpp"
-#include "geometry_msgs/msg/pose_stamped.hpp"
-#include "sensor_msgs/msg/joint_state.hpp"
-#include "std_msgs/msg/bool.hpp"
-#include "std_msgs/msg/float64.hpp"
-#include "std_msgs/msg/float64_multi_array.hpp"
-#include "tf2/LinearMath/Quaternion.h"
+#include "kuka_robot_interface.hpp"
 
 using namespace std::chrono_literals;
 
@@ -39,41 +34,25 @@ enum StrikeType {
 
 class BadmintonDemo : public rclcpp::Node {
 public:
-    BadmintonDemo() : Node("badminton_demo"), demo_state_(TurnState::INIT_BOTH_ROBOTS), turn_count_(0), active_robot_(1), dance_step_count_(0) {
+    BadmintonDemo() 
+        : Node("badminton_demo"),
+          homing_state_({0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}),
+          ready_state_({0.0, -30.0, 0.0, -114.0, 0.0, 0.0, 55.0}),
+          robot1_(this, 1, homing_state_),
+          robot2_(this, 2, homing_state_),
+          demo_state_(TurnState::INIT_BOTH_ROBOTS),
+          turn_count_(0),
+          active_robot_(1),
+          dance_step_count_(0) {
         
         // Declare Parameters
         this->declare_parameter<int>("max_turns", 10);
-        this->declare_parameter<double>("arm_speed_pct", 100.0);  // Default 100%
-        this->declare_parameter<double>("base_speed_pct", 100.0); // Default 100%
+        this->declare_parameter<double>("arm_speed_pct", 100.0);
+        this->declare_parameter<double>("base_speed_pct", 100.0);
 
         max_turns_ = this->get_parameter("max_turns").as_int();
 
-        state_start_time_ = this->now();
-
-        // Publishers & Subscribers for Robot 1
-        goal_pub_1_       = this->create_publisher<geometry_msgs::msg::PoseStamped>("/robot1/goal_pose", 10);
-        arm_pub_1_        = this->create_publisher<sensor_msgs::msg::JointState>("/robot1/arm_cmd_joints", 10);
-        arm_speed_pub_1_  = this->create_publisher<std_msgs::msg::Float64MultiArray>("/robot1/arm_speed", 10);
-        base_speed_pub_1_ = this->create_publisher<std_msgs::msg::Float64>("/robot1/base_speed", 10);
-        base_sub_1_       = this->create_subscription<std_msgs::msg::Bool>(
-            "/robot1/base_target_reached", 10, [this](const std_msgs::msg::Bool::SharedPtr msg) { baseCallback(1, msg); });
-        joint_sub_1_      = this->create_subscription<sensor_msgs::msg::JointState>(
-            "/robot1/joint_states", 10, [this](const sensor_msgs::msg::JointState::SharedPtr msg) { jointCallback(1, msg); });
-
-        // Publishers & Subscribers for Robot 2
-        goal_pub_2_       = this->create_publisher<geometry_msgs::msg::PoseStamped>("/robot2/goal_pose", 10);
-        arm_pub_2_        = this->create_publisher<sensor_msgs::msg::JointState>("/robot2/arm_cmd_joints", 10);
-        arm_speed_pub_2_  = this->create_publisher<std_msgs::msg::Float64MultiArray>("/robot2/arm_speed", 10);
-        base_speed_pub_2_ = this->create_publisher<std_msgs::msg::Float64>("/robot2/base_speed", 10);
-        base_sub_2_       = this->create_subscription<std_msgs::msg::Bool>(
-            "/robot2/base_target_reached", 10, [this](const std_msgs::msg::Bool::SharedPtr msg) { baseCallback(2, msg); });
-        joint_sub_2_      = this->create_subscription<sensor_msgs::msg::JointState>(
-            "/robot2/joint_states", 10, [this](const sensor_msgs::msg::JointState::SharedPtr msg) { jointCallback(2, msg); });
-
-        // Arm Stage Configurations (Degrees)
-        homing_state_ = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        ready_state_  = {0.0, -30.0, 0.0, -114.0, 0.0, 0.0, 55.0}; 
-
+        // Arm Strike Configurations
         strike_up_ = {
             {0.0, 30.0, 0.0, -114.0, 0.0, 55.0, 0.0}, 
             {0.0, 30.0, 0.0, -80.0, 0.0, 0.0, 0.0}, 
@@ -99,23 +78,20 @@ public:
         };
 
         all_strikes_ = {strike_up_, strike_down_, strike_cw_, strike_ccw_};
-        r1_target_joints_ = homing_state_;
-        r2_target_joints_ = homing_state_;
 
         // Random Generators
         unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
         generator_   = std::mt19937(seed);
         strike_dist_ = std::uniform_int_distribution<int>(0, 3);
         
-        random_point_x = std::uniform_real_distribution<double>(-4.0, 4.0);
-        random_point_y = std::uniform_real_distribution<double>(0.0, 2.0);
-        yaw_dist_      = std::uniform_real_distribution<double>(-15.0, 15.0);
-
+        random_point_x  = std::uniform_real_distribution<double>(-4.0, 4.0);
+        random_point_y  = std::uniform_real_distribution<double>(0.0, 2.0);
+        yaw_dist_       = std::uniform_real_distribution<double>(-15.0, 15.0);
         idle_pos_dist_  = std::uniform_real_distribution<double>(-0.15, 0.15);
         idle_yaw_dist_  = std::uniform_real_distribution<double>(-5.0, 5.0);
         arm_dance_dist_ = std::uniform_real_distribution<double>(-15.0, 15.0);
 
-        // Initial delay to connect
+        // Discovery Delay
         init_timer_ = this->create_wall_timer(2s, [this]() {
             init_timer_->cancel();
             RCLCPP_INFO(this->get_logger(), "=== BADMINTON DEMO STARTING ===");
@@ -125,46 +101,33 @@ public:
 
     ~BadmintonDemo() {
         RCLCPP_WARN(this->get_logger(), "Node destroyed! Forcing both arms to HOMING state...");
-        commandArm(1, homing_state_);
-        commandArm(2, homing_state_);
+        robot1_.commandArm(homing_state_);
+        robot2_.commandArm(homing_state_);
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
 
 private:
-    void publishSpeedParameters() {
-        double arm_pct  = this->get_parameter("arm_speed_pct").as_double();
-        double base_pct = this->get_parameter("base_speed_pct").as_double();
-
-        double arm_ratio  = std::max(0.01, std::min(1.0, arm_pct / 100.0));
-        double base_ratio = std::max(0.01, std::min(1.0, base_pct / 100.0));
-
-        auto arm_msg = std_msgs::msg::Float64MultiArray();
-        arm_msg.data = {arm_ratio, arm_ratio, arm_ratio, arm_ratio, arm_ratio, arm_ratio, arm_ratio};
-
-        auto base_msg = std_msgs::msg::Float64();
-        base_msg.data = base_ratio;
-
-        arm_speed_pub_1_->publish(arm_msg);
-        base_speed_pub_1_->publish(base_msg);
-        arm_speed_pub_2_->publish(arm_msg);
-        base_speed_pub_2_->publish(base_msg);
-
-        RCLCPP_INFO(this->get_logger(), "Configured Speed Limits -> Arm: %.1f%%, Base: %.1f%%", arm_pct, base_pct);
-    }
+    KukaRobotInterface& getActiveRobot() { return (active_robot_ == 1) ? robot1_ : robot2_; }
+    KukaRobotInterface& getIdleRobot()   { return (active_robot_ == 1) ? robot2_ : robot1_; }
 
     void startInitialization() {
         demo_state_ = TurnState::INIT_BOTH_ROBOTS;
-        resetFlags();
-        
-        publishSpeedParameters();
 
-        commandBase(1, 0.0, 0.0, 0.0);
-        commandBase(2, 0.0, 0.0, 0.0);
+        double arm_pct  = this->get_parameter("arm_speed_pct").as_double();
+        double base_pct = this->get_parameter("base_speed_pct").as_double();
+        robot1_.setSpeed(arm_pct, base_pct);
+        robot2_.setSpeed(arm_pct, base_pct);
+
+        robot1_.commandBase(0.0, 0.0, 0.0);
+        robot2_.commandBase(0.0, 0.0, 0.0);
         
-        commandArm(1, ready_state_);
-        commandArm(2, ready_state_);
+        robot1_.commandArm(ready_state_);
+        robot2_.commandArm(ready_state_);
         
         RCLCPP_INFO(this->get_logger(), "Initializing... Waiting for bases at 0.0 and arms at Ready state.");
+
+        // Periodic FSM tick (20 Hz)
+        fsm_timer_ = this->create_wall_timer(50ms, std::bind(&BadmintonDemo::advanceFSM, this));
     }
 
     std::vector<double> getRandomDanceArm() {
@@ -179,28 +142,25 @@ private:
         switch (demo_state_) {
             
             case TurnState::INIT_BOTH_ROBOTS: {
-                if (r1_base_reached_ && r1_arm_reached_ && r2_base_reached_ && r2_arm_reached_) {
+                if (robot1_.isFullyReached() && robot2_.isFullyReached()) {
                     RCLCPP_INFO(this->get_logger(), "Init complete. Starting Robot 1 Turn.");
                     demo_state_ = TurnState::START_TURN;
                     active_robot_ = 1;
                     turn_count_ = 0;
-                    advanceFSM(); 
                 }
                 break;
             }
 
             case TurnState::START_TURN: {
                 if (turn_count_ >= max_turns_) {
-                    RCLCPP_INFO(this->get_logger(), "=== RALLY COMPLETE! STARTING DANCE (R1 -> +2.6m | R2 -> -2.6m) ===");
+                    RCLCPP_INFO(this->get_logger(), "=== RALLY COMPLETE! STARTING DANCE ===");
                     demo_state_ = TurnState::START_DANCE;
                     dance_step_count_ = 0;
                     r1_dance_x_ = 0.0; r1_dance_yaw_ = 0.0;
                     r2_dance_x_ = 0.0; r2_dance_yaw_ = 0.0;
-                    advanceFSM();
-                    return;
+                    break;
                 }
 
-                resetFlags();
                 demo_state_ = TurnState::WAIT_MOVE_OUT;
 
                 if (active_robot_ == 1 && turn_count_ == 0) {
@@ -209,12 +169,11 @@ private:
                     active_strike_idx_ = strike_dist_(generator_);
                 }
 
-                int idle_robot = (active_robot_ == 1) ? 2 : 1;
+                int idle_id = (active_robot_ == 1) ? 2 : 1;
+                RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Dispatching Strike %d. Idle Robot %d shuffling.", 
+                            turn_count_, active_robot_, active_strike_idx_, idle_id);
 
-                RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Dispatching Strike %d. Idle Robot %d executing micro-shuffle.", 
-                            turn_count_, active_robot_, active_strike_idx_, idle_robot);
-
-                // 1. Dispatch Active Robot with Interpolation Calculation
+                // Sample and interpolate target active base move
                 active_base_yaw_ = yaw_dist_(generator_);
                 active_base_x_   = random_point_x(generator_);
                 active_base_y_   = random_point_y(generator_);
@@ -227,50 +186,43 @@ private:
 
                 for (int i = 1; i <= intermediate_points; i++) {
                     if (i == intermediate_points) {
-                        commandBase(active_robot_, active_base_x_, active_base_y_, active_base_yaw_);
+                        getActiveRobot().commandBase(active_base_x_, active_base_y_, active_base_yaw_);
                     } else {
-                        commandBase(active_robot_, i * step_x, i * step_y, i * step_yaw);
+                        getActiveRobot().commandBase(i * step_x, i * step_y, i * step_yaw);
                     }
                 }
                 
-                commandArm(active_robot_, all_strikes_[active_strike_idx_][0]);
-
-                // 2. Dispatch Idle Robot (Micro-shuffle)
-                commandBase(idle_robot, idle_pos_dist_(generator_), idle_pos_dist_(generator_), idle_yaw_dist_(generator_));
+                getActiveRobot().commandArm(all_strikes_[active_strike_idx_][0]);
+                getIdleRobot().commandBase(idle_pos_dist_(generator_), idle_pos_dist_(generator_), idle_yaw_dist_(generator_));
                 break;
             }
 
             case TurnState::WAIT_MOVE_OUT: {
-                if (activeBaseReached() && activeArmReached()) {
+                if (getActiveRobot().isFullyReached()) {
                     RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Base ready. Commencing Strike Stage 2 (Hit).", turn_count_, active_robot_);
-                    resetFlags();
                     demo_state_ = TurnState::WAIT_STRIKE;
 
-                    commandArm(active_robot_, all_strikes_[active_strike_idx_][1]);
-
-                    int idle_robot = (active_robot_ == 1) ? 2 : 1;
-                    commandBase(idle_robot, 0.0, 0.0, 0.0);
+                    getActiveRobot().commandArm(all_strikes_[active_strike_idx_][1]);
+                    getIdleRobot().commandBase(0.0, 0.0, 0.0);
                 }
                 break;
             }
 
             case TurnState::WAIT_STRIKE: {
-                if (activeArmReached()) {
+                if (getActiveRobot().isArmReached()) {
                     RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Strike complete. Recovering to Stage 3 (Ready).", turn_count_, active_robot_);
-                    resetFlags();
                     demo_state_ = TurnState::WAIT_RECOVER;
-                    commandArm(active_robot_, all_strikes_[active_strike_idx_][2]);
+
+                    getActiveRobot().commandArm(all_strikes_[active_strike_idx_][2]);
                 }
                 break;
             }
 
             case TurnState::WAIT_RECOVER: {
-                if (activeArmReached()) {
-                    RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Arm recovered. Active Base returning to 0.0 with interpolation.", turn_count_, active_robot_);
-                    resetFlags();
+                if (getActiveRobot().isArmReached()) {
+                    RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Arm recovered. Base returning to 0.0 with interpolation.", turn_count_, active_robot_);
                     demo_state_ = TurnState::WAIT_BASE_RETURN;
 
-                    // Interpolated Base Return back to origin (0.0, 0.0, 0.0)
                     double return_dist = std::hypot(active_base_x_, active_base_y_);
                     int return_steps = std::max(1, static_cast<int>(std::ceil(return_dist / 1.5)));
                     double ret_step_x   = active_base_x_ / return_steps;
@@ -279,9 +231,9 @@ private:
 
                     for (int i = return_steps - 1; i >= 0; i--) {
                         if (i == 0) {
-                            commandBase(active_robot_, 0.0, 0.0, 0.0);
+                            getActiveRobot().commandBase(0.0, 0.0, 0.0);
                         } else {
-                            commandBase(active_robot_, i * ret_step_x, i * ret_step_y, i * ret_step_yaw);
+                            getActiveRobot().commandBase(i * ret_step_x, i * ret_step_y, i * ret_step_yaw);
                         }
                     }
                 }
@@ -289,93 +241,80 @@ private:
             }
 
             case TurnState::WAIT_BASE_RETURN: {
-                if (activeBaseReached()) {
+                if (getActiveRobot().isBaseReached()) {
                     RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Base returned to origin. Ending turn.", turn_count_, active_robot_);
                     
                     if (active_robot_ == 2) {
                         turn_count_++;
                     }
                     active_robot_ = (active_robot_ == 1) ? 2 : 1;
-                    
                     demo_state_ = TurnState::START_TURN;
-                    advanceFSM();
                 }
                 break;
             }
 
             case TurnState::START_DANCE: {
                 if (r1_dance_x_ >= 2.6 && r2_dance_x_ <= -2.6) {
-                    RCLCPP_INFO(this->get_logger(), "=== OUTWARD DANCE COMPLETE (R1: +2.6m, R2: -2.6m). STARTING RETURN PHASE ===");
+                    RCLCPP_INFO(this->get_logger(), "=== OUTWARD DANCE COMPLETE. STARTING RETURN PHASE ===");
                     demo_state_ = TurnState::START_RETURN;
-                    advanceFSM();
-                    return;
+                    break;
                 }
 
-                resetFlags();
                 demo_state_ = TurnState::WAIT_DANCE_STEP;
                 dance_step_count_++;
 
-                r1_dance_x_ += 0.4;
-                if (r1_dance_x_ > 2.6) r1_dance_x_ = 2.6;
+                r1_dance_x_ += 0.4; if (r1_dance_x_ > 2.6) r1_dance_x_ = 2.6;
                 r1_dance_yaw_ -= 180.0;
 
-                r2_dance_x_ -= 0.4;
-                if (r2_dance_x_ < -2.6) r2_dance_x_ = -2.6;
+                r2_dance_x_ -= 0.4; if (r2_dance_x_ < -2.6) r2_dance_x_ = -2.6;
                 r2_dance_yaw_ -= 180.0;
 
-                RCLCPP_INFO(this->get_logger(), "[Dance Step Out %d] R1 X: %0.2fm | R2 X: %0.2fm | Yaw: %0.0f deg", 
-                            dance_step_count_, r1_dance_x_, r2_dance_x_, r1_dance_yaw_);
+                RCLCPP_INFO(this->get_logger(), "[Dance Step Out %d] R1 X: %0.2fm | R2 X: %0.2fm", dance_step_count_, r1_dance_x_, r2_dance_x_);
 
-                commandBase(1, r1_dance_x_, 0.0, r1_dance_yaw_);
-                commandBase(2, r2_dance_x_, 0.0, r2_dance_yaw_);
+                robot1_.commandBase(r1_dance_x_, 0.0, r1_dance_yaw_);
+                robot2_.commandBase(r2_dance_x_, 0.0, r2_dance_yaw_);
 
-                commandArm(1, getRandomDanceArm());
-                commandArm(2, getRandomDanceArm());
+                robot1_.commandArm(getRandomDanceArm());
+                robot2_.commandArm(getRandomDanceArm());
                 break;
             }
 
             case TurnState::WAIT_DANCE_STEP: {
-                if (r1_base_reached_ && r1_arm_reached_ && r2_base_reached_ && r2_arm_reached_) {
+                if (robot1_.isFullyReached() && robot2_.isFullyReached()) {
                     demo_state_ = TurnState::START_DANCE;
-                    advanceFSM();
                 }
                 break;
             }
 
             case TurnState::START_RETURN: {
                 if (r1_dance_x_ <= 0.0 && r2_dance_x_ >= 0.0) {
-                    RCLCPP_INFO(this->get_logger(), "=== RETURN PHASE COMPLETE (Both back at 0.0m). HOMING AND EXITING ===");
+                    RCLCPP_INFO(this->get_logger(), "=== RETURN PHASE COMPLETE. HOMING AND EXITING ===");
                     demo_state_ = TurnState::DONE;
-                    commandArm(1, homing_state_);
-                    commandArm(2, homing_state_);
+                    robot1_.commandArm(homing_state_);
+                    robot2_.commandArm(homing_state_);
+                    fsm_timer_->cancel();
                     rclcpp::shutdown();
                     return;
                 }
 
-                resetFlags();
                 demo_state_ = TurnState::WAIT_RETURN_STEP;
 
-                r1_dance_x_ -= 0.4;
-                if (r1_dance_x_ < 0.0) r1_dance_x_ = 0.0;
+                r1_dance_x_ -= 0.4; if (r1_dance_x_ < 0.0) r1_dance_x_ = 0.0;
+                r2_dance_x_ += 0.4; if (r2_dance_x_ > 0.0) r2_dance_x_ = 0.0;
 
-                r2_dance_x_ += 0.4;
-                if (r2_dance_x_ > 0.0) r2_dance_x_ = 0.0;
+                RCLCPP_INFO(this->get_logger(), "[Return Step] R1 X: %0.2fm | R2 X: %0.2fm", r1_dance_x_, r2_dance_x_);
 
-                RCLCPP_INFO(this->get_logger(), "[Return Step] R1 X: %0.2fm | R2 X: %0.2fm | Fixed Yaw", 
-                            r1_dance_x_, r2_dance_x_);
+                robot1_.commandBase(r1_dance_x_, 0.0, r1_dance_yaw_);
+                robot2_.commandBase(r2_dance_x_, 0.0, r2_dance_yaw_);
 
-                commandBase(1, r1_dance_x_, 0.0, r1_dance_yaw_);
-                commandBase(2, r2_dance_x_, 0.0, r2_dance_yaw_);
-
-                commandArm(1, getRandomDanceArm());
-                commandArm(2, getRandomDanceArm());
+                robot1_.commandArm(getRandomDanceArm());
+                robot2_.commandArm(getRandomDanceArm());
                 break;
             }
 
             case TurnState::WAIT_RETURN_STEP: {
-                if (r1_base_reached_ && r1_arm_reached_ && r2_base_reached_ && r2_arm_reached_) {
+                if (robot1_.isFullyReached() && robot2_.isFullyReached()) {
                     demo_state_ = TurnState::START_RETURN;
-                    advanceFSM();
                 }
                 break;
             }
@@ -385,117 +324,36 @@ private:
         }
     }
 
-    void baseCallback(int id, const std_msgs::msg::Bool::SharedPtr msg) {
-        if ((this->now() - state_start_time_).seconds() < 0.5) return;
-        if (msg->data) {
-            if (id == 1 && !r1_base_reached_) {
-                r1_base_reached_ = true;
-                advanceFSM();
-            } else if (id == 2 && !r2_base_reached_) {
-                r2_base_reached_ = true;
-                advanceFSM();
-            }
-        }
-    }
+    // Default Pose Vectors
+    const std::vector<double> homing_state_;
+    const std::vector<double> ready_state_;
 
-    void jointCallback(int id, const sensor_msgs::msg::JointState::SharedPtr msg) {
-        if ((this->now() - state_start_time_).seconds() < 0.5) return;
-        if (msg->position.size() < 7) return;
+    // Robot Interface Handles
+    KukaRobotInterface robot1_;
+    KukaRobotInterface robot2_;
 
-        const auto& target = (id == 1) ? r1_target_joints_ : r2_target_joints_;
-        
-        double max_err = 0.0;
-        for (size_t i = 0; i < 7; ++i) {
-            double err = std::abs((target[i] * (M_PI / 180.0)) - msg->position[i]);
-            if (err > max_err) max_err = err;
-        }
-
-        if (max_err < 0.035) { 
-            if (id == 1 && !r1_arm_reached_) {
-                r1_arm_reached_ = true;
-                advanceFSM();
-            } else if (id == 2 && !r2_arm_reached_) {
-                r2_arm_reached_ = true;
-                advanceFSM();
-            }
-        }
-    }
-
-    void commandBase(int id, double x, double y, double yaw_deg) {
-        auto pose_msg = geometry_msgs::msg::PoseStamped();
-        pose_msg.header.stamp = this->now();
-        pose_msg.header.frame_id = "odom";
-        
-        pose_msg.pose.position.x = x;
-        pose_msg.pose.position.y = y;
-        
-        tf2::Quaternion q;
-        q.setRPY(0.0, 0.0, yaw_deg * (M_PI / 180.0));
-        pose_msg.pose.orientation.x = q.x(); 
-        pose_msg.pose.orientation.y = q.y();
-        pose_msg.pose.orientation.z = q.z(); 
-        pose_msg.pose.orientation.w = q.w();
-
-        if (id == 1) goal_pub_1_->publish(pose_msg);
-        else goal_pub_2_->publish(pose_msg);
-    }
-
-    void commandArm(int id, const std::vector<double>& target_deg) {
-        auto joint_msg = sensor_msgs::msg::JointState();
-        joint_msg.header.stamp = this->now();
-        joint_msg.name = {"lbr_joint_1", "lbr_joint_2", "lbr_joint_3", "lbr_joint_4", "lbr_joint_5", "lbr_joint_6", "lbr_joint_7"};
-        
-        for (double deg : target_deg) {
-            joint_msg.position.push_back(deg * (M_PI / 180.0));
-        }
-
-        if (id == 1) {
-            r1_target_joints_ = target_deg;
-            arm_pub_1_->publish(joint_msg);
-        } else {
-            r2_target_joints_ = target_deg;
-            arm_pub_2_->publish(joint_msg);
-        }
-    }
-
-    void resetFlags() {
-        r1_base_reached_ = r2_base_reached_ = false;
-        r1_arm_reached_  = r2_arm_reached_  = false;
-        state_start_time_ = this->now();
-    }
-
-    bool activeBaseReached() { return active_robot_ == 1 ? r1_base_reached_ : r2_base_reached_; }
-    bool activeArmReached()  { return active_robot_ == 1 ? r1_arm_reached_  : r2_arm_reached_; }
-
+    // FSM State Variables
     TurnState demo_state_;
     int turn_count_;
     int active_robot_;
     int max_turns_;
     int active_strike_idx_;
 
-    // Target tracking for active base movement
+    // Target Tracking
     double active_base_x_   = 0.0;
     double active_base_y_   = 0.0;
     double active_base_yaw_ = 0.0;
 
-    // Victory Dance Variables
+    // Dance Variables
     int dance_step_count_;
     double r1_dance_x_ = 0.0, r1_dance_yaw_ = 0.0;
     double r2_dance_x_ = 0.0, r2_dance_yaw_ = 0.0;
 
-    std::vector<double> homing_state_;
-    std::vector<double> ready_state_;
     std::vector<std::vector<double>> strike_up_, strike_down_, strike_cw_, strike_ccw_;
     std::vector<std::vector<std::vector<double>>> all_strikes_;
 
-    std::vector<double> r1_target_joints_;
-    std::vector<double> r2_target_joints_;
-    bool r1_base_reached_ = false, r1_arm_reached_ = false;
-    bool r2_base_reached_ = false, r2_arm_reached_ = false;
-    rclcpp::Time state_start_time_;
-
+    // Random Generators
     std::mt19937 generator_;
-
     std::uniform_int_distribution<int> strike_dist_;
     std::uniform_real_distribution<double> random_point_x;
     std::uniform_real_distribution<double> random_point_y;
@@ -504,13 +362,8 @@ private:
     std::uniform_real_distribution<double> idle_yaw_dist_;
     std::uniform_real_distribution<double> arm_dance_dist_;
 
-    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_1_, goal_pub_2_;
-    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr arm_pub_1_, arm_pub_2_;
-    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr arm_speed_pub_1_, arm_speed_pub_2_;
-    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr base_speed_pub_1_, base_speed_pub_2_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr base_sub_1_, base_sub_2_;
-    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_1_, joint_sub_2_;
     rclcpp::TimerBase::SharedPtr init_timer_;
+    rclcpp::TimerBase::SharedPtr fsm_timer_;
 };
 
 int main(int argc, char **argv) {

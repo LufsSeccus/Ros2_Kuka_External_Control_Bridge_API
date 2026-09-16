@@ -58,7 +58,13 @@ ament_target_dependencies(Arm_homing
   tf2
 )
 
-add_executable(badminton_demo_node src/badminton_demo_node.cpp)
+include_directories(include)
+
+add_executable(badminton_demo_node
+  src/kuka_robot_interface.cpp
+  src/badminton_demo_node.cpp
+)
+
 ament_target_dependencies(badminton_demo_node
   rclcpp
   geometry_msgs
