@@ -22,6 +22,8 @@ enum class TurnState {
     WAIT_DANCE_STEP,
     START_RETURN,
     WAIT_RETURN_STEP,
+    FINAL_BASE_ALIGN,
+    WAIT_FINAL_BASE_ALIGN,
     DONE
 };
 
@@ -89,7 +91,9 @@ public:
         yaw_dist_       = std::uniform_real_distribution<double>(-15.0, 15.0);
         idle_pos_dist_  = std::uniform_real_distribution<double>(-0.15, 0.15);
         idle_yaw_dist_  = std::uniform_real_distribution<double>(-5.0, 5.0);
-        arm_dance_dist_ = std::uniform_real_distribution<double>(-15.0, 15.0);
+
+        // Dance arm jitter range (-30 to +30 degrees)
+        arm_dance_dist_ = std::uniform_real_distribution<double>(-30.0, 30.0);
 
         // Discovery Delay
         init_timer_ = this->create_wall_timer(2s, [this]() {
@@ -101,8 +105,8 @@ public:
 
     ~BadmintonDemo() {
         RCLCPP_WARN(this->get_logger(), "Node destroyed! Forcing both arms to HOMING state...");
-        robot1_.commandArm(homing_state_);
-        robot2_.commandArm(homing_state_);
+        robot1_.commandArmJoints(homing_state_);
+        robot2_.commandArmJoints(homing_state_);
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
 
@@ -121,8 +125,8 @@ private:
         robot1_.commandBase(0.0, 0.0, 0.0);
         robot2_.commandBase(0.0, 0.0, 0.0);
         
-        robot1_.commandArm(ready_state_);
-        robot2_.commandArm(ready_state_);
+        robot1_.commandArmJoints(ready_state_);
+        robot2_.commandArmJoints(ready_state_);
         
         RCLCPP_INFO(this->get_logger(), "Initializing... Waiting for bases at 0.0 and arms at Ready state.");
 
@@ -130,10 +134,13 @@ private:
         fsm_timer_ = this->create_wall_timer(50ms, std::bind(&BadmintonDemo::advanceFSM, this));
     }
 
-    std::vector<double> getRandomDanceArm() {
+    // Sequentially unlocks joints 1 to N based on current step_count
+    std::vector<double> getStepDanceArm(int step_count) {
         std::vector<double> dance_arm = homing_state_;
-        for (size_t i = 0; i < 7; ++i) {
-            dance_arm[i] += arm_dance_dist_(generator_);
+        int active_joints = std::min(step_count, 7);
+
+        for (int i = 0; i < active_joints; ++i) {
+            dance_arm[i] = homing_state_[i] + arm_dance_dist_(generator_);
         }
         return dance_arm;
     }
@@ -192,7 +199,7 @@ private:
                     }
                 }
                 
-                getActiveRobot().commandArm(all_strikes_[active_strike_idx_][0]);
+                getActiveRobot().commandArmJoints(all_strikes_[active_strike_idx_][0]);
                 getIdleRobot().commandBase(idle_pos_dist_(generator_), idle_pos_dist_(generator_), idle_yaw_dist_(generator_));
                 break;
             }
@@ -202,24 +209,24 @@ private:
                     RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Base ready. Commencing Strike Stage 2 (Hit).", turn_count_, active_robot_);
                     demo_state_ = TurnState::WAIT_STRIKE;
 
-                    getActiveRobot().commandArm(all_strikes_[active_strike_idx_][1]);
+                    getActiveRobot().commandArmJoints(all_strikes_[active_strike_idx_][1]);
                     getIdleRobot().commandBase(0.0, 0.0, 0.0);
                 }
                 break;
             }
 
             case TurnState::WAIT_STRIKE: {
-                if (getActiveRobot().isArmReached()) {
+                if (getActiveRobot().isJointsArmReached()) {
                     RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Strike complete. Recovering to Stage 3 (Ready).", turn_count_, active_robot_);
                     demo_state_ = TurnState::WAIT_RECOVER;
 
-                    getActiveRobot().commandArm(all_strikes_[active_strike_idx_][2]);
+                    getActiveRobot().commandArmJoints(all_strikes_[active_strike_idx_][2]);
                 }
                 break;
             }
 
             case TurnState::WAIT_RECOVER: {
-                if (getActiveRobot().isArmReached()) {
+                if (getActiveRobot().isJointsArmReached()) {
                     RCLCPP_INFO(this->get_logger(), "[Turn %d/Robot %d] Arm recovered. Base returning to 0.0 with interpolation.", turn_count_, active_robot_);
                     demo_state_ = TurnState::WAIT_BASE_RETURN;
 
@@ -269,13 +276,14 @@ private:
                 r2_dance_x_ -= 0.4; if (r2_dance_x_ < -2.6) r2_dance_x_ = -2.6;
                 r2_dance_yaw_ -= 180.0;
 
-                RCLCPP_INFO(this->get_logger(), "[Dance Step Out %d] R1 X: %0.2fm | R2 X: %0.2fm", dance_step_count_, r1_dance_x_, r2_dance_x_);
+                RCLCPP_INFO(this->get_logger(), "[Dance Step Out %d] Unlocking %d joint(s) | R1 X: %0.2fm | R2 X: %0.2fm", 
+                            dance_step_count_, std::min(dance_step_count_, 7), r1_dance_x_, r2_dance_x_);
 
                 robot1_.commandBase(r1_dance_x_, 0.0, r1_dance_yaw_);
                 robot2_.commandBase(r2_dance_x_, 0.0, r2_dance_yaw_);
 
-                robot1_.commandArm(getRandomDanceArm());
-                robot2_.commandArm(getRandomDanceArm());
+                robot1_.commandArmJoints(getStepDanceArm(dance_step_count_));
+                robot2_.commandArmJoints(getStepDanceArm(dance_step_count_));
                 break;
             }
 
@@ -288,33 +296,53 @@ private:
 
             case TurnState::START_RETURN: {
                 if (r1_dance_x_ <= 0.0 && r2_dance_x_ >= 0.0) {
-                    RCLCPP_INFO(this->get_logger(), "=== RETURN PHASE COMPLETE. HOMING AND EXITING ===");
-                    demo_state_ = TurnState::DONE;
-                    robot1_.commandArm(homing_state_);
-                    robot2_.commandArm(homing_state_);
-                    fsm_timer_->cancel();
-                    rclcpp::shutdown();
-                    return;
+                    RCLCPP_INFO(this->get_logger(), "=== RETURN POSITION COMPLETE. TURNING BASES BACK TO 0 DEG ORIGIN ===");
+                    demo_state_ = TurnState::FINAL_BASE_ALIGN;
+                    break;
                 }
 
                 demo_state_ = TurnState::WAIT_RETURN_STEP;
+                dance_step_count_++;
 
                 r1_dance_x_ -= 0.4; if (r1_dance_x_ < 0.0) r1_dance_x_ = 0.0;
                 r2_dance_x_ += 0.4; if (r2_dance_x_ > 0.0) r2_dance_x_ = 0.0;
 
-                RCLCPP_INFO(this->get_logger(), "[Return Step] R1 X: %0.2fm | R2 X: %0.2fm", r1_dance_x_, r2_dance_x_);
+                RCLCPP_INFO(this->get_logger(), "[Return Step %d] R1 X: %0.2fm | R2 X: %0.2fm", dance_step_count_, r1_dance_x_, r2_dance_x_);
 
                 robot1_.commandBase(r1_dance_x_, 0.0, r1_dance_yaw_);
                 robot2_.commandBase(r2_dance_x_, 0.0, r2_dance_yaw_);
 
-                robot1_.commandArm(getRandomDanceArm());
-                robot2_.commandArm(getRandomDanceArm());
+                robot1_.commandArmJoints(getStepDanceArm(dance_step_count_));
+                robot2_.commandArmJoints(getStepDanceArm(dance_step_count_));
                 break;
             }
 
             case TurnState::WAIT_RETURN_STEP: {
                 if (robot1_.isFullyReached() && robot2_.isFullyReached()) {
                     demo_state_ = TurnState::START_RETURN;
+                }
+                break;
+            }
+
+            case TurnState::FINAL_BASE_ALIGN: {
+                demo_state_ = TurnState::WAIT_FINAL_BASE_ALIGN;
+
+                // Reset base rotation back to 0.0 degrees at origin (0.0, 0.0)
+                robot1_.commandBase(0.0, 0.0, 0.0);
+                robot2_.commandBase(0.0, 0.0, 0.0);
+
+                // Command arms to clean homing position
+                robot1_.commandArmJoints(homing_state_);
+                robot2_.commandArmJoints(homing_state_);
+                break;
+            }
+
+            case TurnState::WAIT_FINAL_BASE_ALIGN: {
+                if (robot1_.isFullyReached() && robot2_.isFullyReached()) {
+                    RCLCPP_INFO(this->get_logger(), "=== DEMO COMPLETE. BASES HOMED AT 0.0 ORIGIN. EXITING ===");
+                    demo_state_ = TurnState::DONE;
+                    fsm_timer_->cancel();
+                    rclcpp::shutdown();
                 }
                 break;
             }

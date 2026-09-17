@@ -8,6 +8,8 @@ KukaRobotInterface::KukaRobotInterface(rclcpp::Node* node_ptr, int robot_id, con
 
     // Setup Publishers
     goal_pub_       = node_->create_publisher<geometry_msgs::msg::PoseStamped>(ns_ + "/goal_pose", 10);
+    arm_pose_pub_   = node_->create_publisher<geometry_msgs::msg::PoseStamped>(ns_ + "/arm_goal_pose", 10);
+    
     arm_pub_        = node_->create_publisher<sensor_msgs::msg::JointState>(ns_ + "/arm_cmd_joints", 10);
     arm_speed_pub_  = node_->create_publisher<std_msgs::msg::Float64MultiArray>(ns_ + "/arm_speed", 10);
     base_speed_pub_ = node_->create_publisher<std_msgs::msg::Float64>(ns_ + "/base_speed", 10);
@@ -18,6 +20,10 @@ KukaRobotInterface::KukaRobotInterface(rclcpp::Node* node_ptr, int robot_id, con
 
     joint_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
         ns_ + "/joint_states", 10, std::bind(&KukaRobotInterface::jointCallback, this, std::placeholders::_1));
+
+    // FIX 2: Updated topic name to match bridge publisher 'ee_pose_state'
+    arm_pose_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
+        ns_ + "/ee_pose_state", 10, std::bind(&KukaRobotInterface::armPoseCallback, this, std::placeholders::_1));
 }
 
 void KukaRobotInterface::commandBase(double x, double y, double yaw_deg) {
@@ -39,7 +45,8 @@ void KukaRobotInterface::commandBase(double x, double y, double yaw_deg) {
     goal_pub_->publish(pose_msg);
 }
 
-void KukaRobotInterface::commandArm(const std::vector<double>& target_deg) {
+void KukaRobotInterface::commandArmJoints(const std::vector<double>& target_deg) {
+    arm_mode_ = ArmControlMode::JOINTS;
     target_joints_deg_ = target_deg;
     
     auto joint_msg = sensor_msgs::msg::JointState();
@@ -50,9 +57,35 @@ void KukaRobotInterface::commandArm(const std::vector<double>& target_deg) {
         joint_msg.position.push_back(deg * (M_PI / 180.0));
     }
 
-    arm_reached_ = false;
+    joints_reached_ = false;
     last_cmd_time_ = node_->now();
     arm_pub_->publish(joint_msg);
+}
+
+void KukaRobotInterface::commandArmEE(double x, double y, double z, double roll_deg, double pitch_deg, double yaw_deg) {
+    arm_mode_ = ArmControlMode::CARTESIAN;
+    target_ee_x_ = x;
+    target_ee_y_ = y;
+    target_ee_z_ = z;
+
+    auto pose_msg = geometry_msgs::msg::PoseStamped();
+    pose_msg.header.stamp = node_->now();
+    pose_msg.header.frame_id = "base_link"; 
+    
+    pose_msg.pose.position.x = x;
+    pose_msg.pose.position.y = y;
+    pose_msg.pose.position.z = z;
+
+    tf2::Quaternion q;
+    q.setRPY(roll_deg * (M_PI / 180.0), pitch_deg * (M_PI / 180.0), yaw_deg * (M_PI / 180.0));
+    pose_msg.pose.orientation.x = q.x();
+    pose_msg.pose.orientation.y = q.y();
+    pose_msg.pose.orientation.z = q.z();
+    pose_msg.pose.orientation.w = q.w();
+
+    ee_reached_ = false;
+    last_cmd_time_ = node_->now();
+    arm_pose_pub_->publish(pose_msg);
 }
 
 void KukaRobotInterface::setSpeed(double arm_pct, double base_pct) {
@@ -69,10 +102,18 @@ void KukaRobotInterface::setSpeed(double arm_pct, double base_pct) {
     base_speed_pub_->publish(base_msg);
 }
 
+bool KukaRobotInterface::isFullyReached() const {
+    if (arm_mode_ == ArmControlMode::JOINTS) {
+        return base_reached_ && joints_reached_;
+    }
+    return base_reached_ && ee_reached_;
+}
+
 void KukaRobotInterface::resetFlags() {
-    base_reached_ = false;
-    arm_reached_  = false;
-    last_cmd_time_ = node_->now();
+    base_reached_   = false;
+    joints_reached_ = false;
+    ee_reached_     = false;
+    last_cmd_time_  = node_->now();
 }
 
 void KukaRobotInterface::baseCallback(const std_msgs::msg::Bool::SharedPtr msg) {
@@ -93,6 +134,20 @@ void KukaRobotInterface::jointCallback(const sensor_msgs::msg::JointState::Share
     }
 
     if (max_err < 0.035) {
-        arm_reached_ = true;
+        joints_reached_ = true;
+    }
+}
+
+void KukaRobotInterface::armPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+    if ((node_->now() - last_cmd_time_).seconds() < 0.5) return;
+
+    // Check Cartesian Euclidean Distance Error
+    double dx = target_ee_x_ - msg->pose.position.x;
+    double dy = target_ee_y_ - msg->pose.position.y;
+    double dz = target_ee_z_ - msg->pose.position.z;
+    double error = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+    if (error < 0.015) { // 1.5 cm tolerance
+        ee_reached_ = true;
     }
 }
