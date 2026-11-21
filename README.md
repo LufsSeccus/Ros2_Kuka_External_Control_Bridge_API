@@ -1,5 +1,5 @@
 # ROS2 KUKA External Control Bridge
-A special thanks to @Crappling for his contribution to my Project
+A special thanks to [Crappling](https://github.com/Crapling) for his contribution to my Project
 
 A lightweight ROS 2 bridge for controlling a **KUKA KMR iiwa 14 R820** running **Sunrise.OS** using the **KUKA RoboticsAPI** over UDP.
 
